@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/alecthomas/units"
 	"github.com/fatih/color"
@@ -71,22 +72,21 @@ func NewHTTPDownloader(url string, par int, skipTLS bool, proxyServer string, bw
 		par = 1
 	}
 
-	//get download range
+	// Get download range
 	clen := resp.Header.Get(contentLengthHeader)
 	if clen == "" {
 		Printf("Target url not contain Content-Length header, fallback to parallel 1\n")
-		clen = "1" //set 1 because of progress bar not accept 0 length
+		clen = "1" // set 1 because progress bar does not accept 0 length
 		par = 1
 		resumable = false
 	}
 
 	Printf("Start download with %d connections \n", par)
 
-	len, err := strconv.ParseInt(clen, 10, 64)
+	lenValue, err := strconv.ParseInt(clen, 10, 64)
 	FatalCheck(err)
 
-	sizeInMb := float64(len) / (1024 * 1024)
-
+	sizeInMb := float64(lenValue) / (1024 * 1024)
 	if clen == "1" {
 		Printf("Download size: not specified\n")
 	} else if sizeInMb < 1024 {
@@ -106,18 +106,18 @@ func NewHTTPDownloader(url string, par int, skipTLS bool, proxyServer string, bw
 	ret.url = url
 	ret.file = file
 	ret.par = int64(par)
-	ret.len = len
+	ret.len = lenValue
 	ret.ips = ipstr
 	ret.skipTLS = skipTLS
-	ret.parts = partCalculate(int64(par), len, url)
+	ret.parts = partCalculate(int64(par), lenValue, url)
 	ret.resumable = resumable
 	ret.proxy = proxyServer
 
 	return ret
 }
 
+// partCalculate splits the download into parts.
 func partCalculate(par int64, len int64, url string) []Part {
-	// Pre-allocate, perf tunning
 	ret := make([]Part, par)
 	for j := int64(0); j < par; j++ {
 		from := (len / par) * j
@@ -135,22 +135,19 @@ func partCalculate(par int64, len int64, url string) []Part {
 			os.Exit(1)
 		}
 
-		// Padding 0 before path name as filename will be sorted as string
+		// Padding 0 before path name as filename will be sorted as strings
 		fname := fmt.Sprintf("%s.part%06d", file, j)
-		path := filepath.Join(folder, fname) // ~/.hget/download-file-name/part-name
+		path := filepath.Join(folder, fname) // e.g. ~/.hget/download-file-name/part-name
 		ret[j] = Part{Index: j, URL: url, Path: path, RangeFrom: from, RangeTo: to}
 	}
-
 	return ret
 }
 
-// ProxyAwareHTTPClient will use http or socks5 proxy if given one.
+// ProxyAwareHTTPClient returns an HTTP client that may use an HTTP or SOCKS5 proxy.
 func ProxyAwareHTTPClient(proxyServer string) *http.Client {
-	// setup a http client
 	httpTransport := &http.Transport{}
 	httpClient := &http.Client{Transport: httpTransport}
-	var dialer proxy.Dialer
-	dialer = proxy.Direct
+	var dialer proxy.Dialer = proxy.Direct
 
 	if len(proxyServer) > 0 {
 		if strings.HasPrefix(proxyServer, "http") {
@@ -158,146 +155,173 @@ func ProxyAwareHTTPClient(proxyServer string) *http.Client {
 			if err != nil {
 				fmt.Fprintln(os.Stderr, "invalid proxy: ", err)
 			}
-			// create a http dialer
 			dialer, err = proxy.FromURL(proxyURL, proxy.Direct)
 			if err == nil {
 				httpTransport.Dial = dialer.Dial
 			}
 		} else {
-			// create a socks5 dialer
 			dialer, err := proxy.SOCKS5("tcp", proxyServer, nil, proxy.Direct)
 			if err == nil {
 				httpTransport.Dial = dialer.Dial
 			}
 		}
-
 	}
 	return httpClient
 }
 
-// Do is where the magic happens.
+// Do is the main download entry point. It dispatches the download to multiple parts.
 func (d *HTTPDownloader) Do(doneChan chan bool, fileChan chan string, errorChan chan error, interruptChan chan bool, stateSaveChan chan Part) {
-	var ws sync.WaitGroup
+	var wg sync.WaitGroup
 	var bars []*pb.ProgressBar
-	var barpool *pb.Pool
-	var err error
 
+	// Start each part via helper functions.
 	for _, p := range d.parts {
-
+		// If the part is already completed or has no data to download.
 		if p.RangeTo <= p.RangeFrom {
-			fileChan <- p.Path
-			stateSaveChan <- Part{
-				Index:     p.Index,
-				URL:       d.url,
-				Path:      p.Path,
-				RangeFrom: p.RangeFrom,
-				RangeTo:   p.RangeTo,
-			}
-
+			d.handleCompletedPart(p, fileChan, stateSaveChan)
 			continue
 		}
 
 		var bar *pb.ProgressBar
-
 		if DisplayProgressBar() {
-			bar = pb.New64(p.RangeTo - p.RangeFrom).SetUnits(pb.U_BYTES).Prefix(color.YellowString(fmt.Sprintf("%s-%d", d.file, p.Index)))
+			bar = pb.New64(p.RangeTo - p.RangeFrom).
+				SetUnits(pb.U_BYTES).
+				Prefix(color.YellowString(fmt.Sprintf("%s-%d", d.file, p.Index)))
 			bars = append(bars, bar)
 		}
 
-		ws.Add(1)
-		go func(d *HTTPDownloader, bar *pb.ProgressBar, part Part) {
-			client := ProxyAwareHTTPClient(d.proxy)
-			defer ws.Done()
-
-			var ranges string
-			if part.RangeTo != d.len {
-				ranges = fmt.Sprintf("bytes=%d-%d", part.RangeFrom, part.RangeTo)
-			} else {
-				ranges = fmt.Sprintf("bytes=%d-", part.RangeFrom) //get all
-			}
-
-			//send request
-			req, err := http.NewRequest("GET", d.url, nil)
-			if err != nil {
-				errorChan <- err
-				return
-			}
-
-			if d.par > 1 { //support range download just in case parallel factor is over 1
-				req.Header.Add("Range", ranges)
-				if err != nil {
-					errorChan <- err
-					return
-				}
-			}
-
-			//write to file
-			resp, err := client.Do(req)
-			if err != nil {
-				errorChan <- err
-				return
-			}
-			defer resp.Body.Close()
-			f, err := os.OpenFile(part.Path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
-
-			defer f.Close()
-			if err != nil {
-				Errorf("%v\n", err)
-				errorChan <- err
-				return
-			}
-
-			var writer io.Writer
-			if DisplayProgressBar() {
-				writer = io.MultiWriter(f, bar)
-			} else {
-				writer = io.MultiWriter(f)
-			}
-
-			current := int64(0)
-			finishDownloadChan := make(chan bool)
-
-			go func() {
-				var written int64
-				if d.rate != 0 {
-					reader := shapeio.NewReader(resp.Body)
-					reader.SetRateLimit(float64(d.rate))
-					written, _ = io.Copy(writer, reader)
-				} else {
-					written, _ = io.Copy(writer, resp.Body)
-				}
-				current += written
-				fileChan <- part.Path
-				finishDownloadChan <- true
-			}()
-
-			select {
-			case <-interruptChan:
-				// interrupt download by forcefully close the input stream
-				resp.Body.Close()
-				<-finishDownloadChan
-			case <-finishDownloadChan:
-			}
-
-			stateSaveChan <- Part{
-				Index:     part.Index,
-				URL:       d.url,
-				Path:      part.Path,
-				RangeFrom: current + part.RangeFrom,
-				RangeTo:   part.RangeTo,
-			}
-
-			if DisplayProgressBar() {
-				bar.Update()
-				bar.Finish()
-			}
-		}(d, bar, p)
+		wg.Add(1)
+		go d.downloadPart(p, bar, &wg, fileChan, errorChan, interruptChan, stateSaveChan)
 	}
 
-	barpool, err = pb.StartPool(bars...)
-	FatalCheck(err)
+	// Start the progress bar pool if needed.
+	if DisplayProgressBar() && len(bars) > 0 {
+		pool, err := pb.StartPool(bars...)
+		FatalCheck(err)
+		wg.Wait()
+		doneChan <- true
+		pool.Stop()
+	} else {
+		wg.Wait()
+		doneChan <- true
+	}
+}
 
-	ws.Wait()
-	doneChan <- true
-	barpool.Stop()
+// handleCompletedPart simply notifies that a part doesn't need downloading.
+func (d *HTTPDownloader) handleCompletedPart(p Part, fileChan chan string, stateSaveChan chan Part) {
+	fileChan <- p.Path
+	// Send a part indicating no additional data
+	stateSaveChan <- Part{
+		Index:     p.Index,
+		URL:       d.url,
+		Path:      p.Path,
+		RangeFrom: p.RangeFrom,
+		RangeTo:   p.RangeTo,
+	}
+}
+
+// downloadPart handles the download process for an individual part.
+func (d *HTTPDownloader) downloadPart(part Part, bar *pb.ProgressBar, wg *sync.WaitGroup,
+	fileChan chan string, errorChan chan error, interruptChan chan bool, stateSaveChan chan Part) {
+	defer wg.Done()
+
+	// Build and issue the HTTP request.
+	req, err := d.buildRequestForPart(part)
+	if err != nil {
+		errorChan <- err
+		return
+	}
+
+	client := ProxyAwareHTTPClient(d.proxy)
+	resp, err := client.Do(req)
+	if err != nil {
+		errorChan <- err
+		return
+	}
+	defer resp.Body.Close()
+
+	// Open the file for appending data.
+	f, err := os.OpenFile(part.Path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+	if err != nil {
+		Errorf("%v\n", err)
+		errorChan <- err
+		return
+	}
+	defer f.Close()
+
+	// Combine file writer and progress bar writer if needed.
+	var writer io.Writer
+	if DisplayProgressBar() && bar != nil {
+		writer = io.MultiWriter(f, bar)
+	} else {
+		writer = f
+	}
+
+	// Start copying content in a goroutine.
+	current := int64(0)
+	finishDownloadChan := make(chan bool)
+	go d.copyContent(resp.Body, writer, finishDownloadChan)
+
+	// Wait for either an interrupt event or a successful completion.
+	select {
+	case <-interruptChan:
+		// An interrupt is received; close the response body to terminate download.
+		resp.Body.Close()
+		<-finishDownloadChan // wait for cleanup
+	case <-finishDownloadChan:
+		// Download finished normally.
+	}
+
+	// Update part state and notify fileChan.
+	currentPart := Part{
+		Index:     part.Index,
+		URL:       d.url,
+		Path:      part.Path,
+		RangeFrom: part.RangeFrom + current, // update the downloaded offset
+		RangeTo:   part.RangeTo,
+	}
+	stateSaveChan <- currentPart
+	fileChan <- part.Path
+
+	// Finalize progress bar if used.
+	if DisplayProgressBar() && bar != nil {
+		// Give a small moment for the bar to update.
+		time.Sleep(100 * time.Millisecond)
+		bar.Finish()
+	}
+}
+
+// buildRequestForPart prepares the HTTP GET request for a given part including the Range header.
+func (d *HTTPDownloader) buildRequestForPart(part Part) (*http.Request, error) {
+	req, err := http.NewRequest("GET", d.url, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	// Add Range header if downloading in parallel.
+	if d.par > 1 {
+		var ranges string
+		// If RangeTo is not the very end, use an explicit range.
+		if part.RangeTo != d.len {
+			ranges = fmt.Sprintf("bytes=%d-%d", part.RangeFrom, part.RangeTo)
+		} else {
+			// Otherwise, download until the end.
+			ranges = fmt.Sprintf("bytes=%d-", part.RangeFrom)
+		}
+		req.Header.Add("Range", ranges)
+	}
+
+	return req, nil
+}
+
+// copyContent copies data from the response to the writer with an optional weigthed rate limiter.
+func (d *HTTPDownloader) copyContent(src io.Reader, dst io.Writer, done chan bool) {
+	defer func() { done <- true }()
+	if d.rate != 0 {
+		reader := shapeio.NewReader(src)
+		reader.SetRateLimit(float64(d.rate))
+		_, _ = io.Copy(dst, reader)
+	} else {
+		_, _ = io.Copy(dst, src)
+	}
 }
