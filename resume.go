@@ -8,9 +8,10 @@ import (
 	"strings"
 )
 
-// TaskPrint read and prints data about current download jobs
+// TaskPrint reads and prints data about current download jobs.
 func TaskPrint() error {
-	downloading, err := ioutil.ReadDir(filepath.Join(os.Getenv("HOME"), dataFolder))
+	downloadingPath := filepath.Join(os.Getenv("HOME"), dataFolder)
+	downloading, err := ioutil.ReadDir(downloadingPath)
 	if err != nil {
 		return err
 	}
@@ -23,13 +24,31 @@ func TaskPrint() error {
 	}
 
 	folderString := strings.Join(folders, "\n")
-	Printf("Currently on going download: \n")
+	Printf("Currently on going download(s):\n")
 	fmt.Println(folderString)
 
 	return nil
 }
 
-// Resume gets back to a previously stopped task
 func Resume(task string) (*State, error) {
-	return Read(task)
+	state, err := Read(task)
+	if err != nil {
+		return nil, err
+	}
+
+	for i, part := range state.Parts {
+		fi, err := os.Stat(part.Path)
+		if err != nil {
+			continue
+		}
+		downloaded := fi.Size()
+		newFrom := part.RangeFrom + downloaded
+		if newFrom >= part.RangeTo {
+			newFrom = part.RangeTo
+		}
+		Printf("Resuming part %d: skipping %d bytes, new start offset: %d\n", part.Index, downloaded, newFrom)
+		state.Parts[i].RangeFrom = newFrom
+	}
+
+	return state, nil
 }

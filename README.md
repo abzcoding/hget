@@ -16,7 +16,7 @@
 ### Install
 
 ```bash
-$ go get -d github.com/abzcoding/hget
+$ go get github.com/abzcoding/hget
 $ cd $GOPATH/src/github.com/abzcoding/hget
 $ make clean install
 ```
@@ -33,6 +33,11 @@ hget -proxy "127.0.0.1:12345" URL # to download using socks5 proxy
 hget -proxy "http://sample-proxy.com:8080" URL # to download using http proxy
 hget -file sample.txt # to download a list of urls
 hget -n 4 -rate 100KB URL # to download using 4 threads & limited to 100KB per second
+
+# real world example
+hget -n 16 -rate 10MiB "https://releases.ubuntu.com/24.04.1/ubuntu-24.04.1-desktop-amd64.iso"
+# resuming a stopped download
+hget -resume "ubuntu-24.04.1-desktop-amd64.iso"
 ```
 
 ### Help
@@ -62,5 +67,3 @@ To interrupt any on-downloading process, just ctrl-c or ctrl-d at the middle of 
 
 ### Resume
 ![](https://i.gyazo.com/caa69808f6377421cb2976f323768dc4.gif)
-
-
