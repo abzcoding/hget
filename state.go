@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"io/ioutil"
 	"os"
+	"os/user"
 	"path/filepath"
 )
 
@@ -37,7 +38,10 @@ func (s *State) Save() error {
 
 	//move current downloading file to data folder
 	for _, part := range s.Parts {
-		os.Rename(part.Path, filepath.Join(folder, filepath.Base(part.Path)))
+		err := os.Rename(part.Path, filepath.Join(folder, filepath.Base(part.Path)))
+		if err != nil {
+			return err
+		}
 	}
 
 	//save state file
@@ -50,7 +54,14 @@ func (s *State) Save() error {
 
 // Read loads data about the state of downloaded files
 func Read(task string) (*State, error) {
-	file := filepath.Join(os.Getenv("HOME"), dataFolder, task, stateFileName)
+	usr, err := user.Current()
+	FatalCheck(err)
+	homeDir := usr.HomeDir
+
+	// extract filename from task
+	taskName := TaskFromURL(task)
+
+	file := filepath.Join(homeDir, dataFolder, taskName, stateFileName)
 	Printf("Getting data from %s\n", file)
 	bytes, err := ioutil.ReadFile(file)
 	if err != nil {

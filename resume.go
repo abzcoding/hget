@@ -4,13 +4,18 @@ import (
 	"fmt"
 	"io/ioutil"
 	"os"
+	"os/user"
 	"path/filepath"
 	"strings"
 )
 
 // TaskPrint reads and prints data about current download jobs.
 func TaskPrint() error {
-	downloadingPath := filepath.Join(os.Getenv("HOME"), dataFolder)
+	usr, err := user.Current()
+	FatalCheck(err)
+	homeDir := usr.HomeDir
+
+	downloadingPath := filepath.Join(homeDir, dataFolder)
 	downloading, err := ioutil.ReadDir(downloadingPath)
 	if err != nil {
 		return err

@@ -1,26 +1,30 @@
-COMMIT = $$(git describe --always)
+COMMIT := $(shell git describe --always)
+BINARY := hget
+BINDIR := bin
+INSTALL_PATH := /usr/local/bin
+
+.PHONY: all clean build install test deps
+
+all: build
 
 deps:
-	@echo "====> Install dependencies..."
-	go get github.com/fatih/color
-	go get github.com/mattn/go-colorable
-	go get github.com/mattn/go-isatty
-	go get github.com/fatih/color
-	go get gopkg.in/cheggaaa/pb.v1
-	go get github.com/mattn/go-isatty
-	go get github.com/imkira/go-task
-	go get github.com/fujiwara/shapeio
-	go get github.com/alecthomas/units
+	@echo "====> Updating dependencies..."
+	go mod tidy
 
 clean:
-	@echo "====> Remove installed binary"
-	rm -f bin/hget
+	@echo "====> Removing installed binary"
+	rm -f $(BINDIR)/$(BINARY)
+
+test:
+	@echo "====> Running tests..."
+	go test -v ./...
 
 build: deps
-	@echo "====> Build hget in ./bin "
-	go build -ldflags "-X main.GitCommit=\"$(COMMIT)\"" -o bin/hget
+	@echo "====> Building $(BINARY) in ./$(BINDIR)"
+	mkdir -p $(BINDIR)
+	go build -ldflags "-X main.GitCommit=\"$(COMMIT)\"" -o $(BINDIR)/$(BINARY)
 
 install: build
-	@echo "====> Installing hget in /usr/local/bin/hget"
-	chmod +x ./bin/hget
-	sudo mv ./bin/hget /usr/local/bin/hget
+	@echo "====> Installing $(BINARY) in $(INSTALL_PATH)/$(BINARY)"
+	chmod +x ./$(BINDIR)/$(BINARY)
+	sudo mv ./$(BINDIR)/$(BINARY) $(INSTALL_PATH)/$(BINARY)

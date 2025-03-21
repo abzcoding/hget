@@ -19,7 +19,7 @@ func main() {
 	var proxy, filePath, bwLimit, resumeTask string
 
 	conn := flag.Int("n", runtime.NumCPU(), "number of connections")
-	skiptls := flag.Bool("skip-tls", true, "skip certificate verification for https")
+	skiptls := flag.Bool("skip-tls", false, "skip certificate verification for https")
 	flag.StringVar(&proxy, "proxy", "", "proxy for downloading, e.g. -proxy '127.0.0.1:12345' for socks5 or -proxy 'http://proxy.com:8080' for http proxy")
 	flag.StringVar(&filePath, "file", "", "path to a file that contains one URL per line")
 	flag.StringVar(&bwLimit, "rate", "", "bandwidth limit during download, e.g. -rate 10kB or -rate 10MiB")
@@ -161,7 +161,7 @@ hget [options] --resume=TaskName
 
 Options:
   -n int          number of connections (default number of CPUs)
-  -skip-tls bool  skip certificate verification for https (default true)
+  -skip-tls bool  skip certificate verification for https (default false)
   -proxy string   proxy address (e.g., '127.0.0.1:12345' for socks5 or 'http://proxy.com:8080')
   -file string    file path containing URLs (one per line)
   -rate string    bandwidth limit during download (e.g., 10kB, 10MiB)

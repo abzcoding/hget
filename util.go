@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"os/user"
 	"path/filepath"
 	"strings"
 
@@ -53,13 +54,16 @@ func DisplayProgressBar() bool {
 
 // FolderOf makes sure you won't get LFI
 func FolderOf(urlStr string) string {
-	safePath := filepath.Join(os.Getenv("HOME"), dataFolder)
+	usr, err := user.Current()
+	FatalCheck(err)
+	homeDir := usr.HomeDir
+	safePath := filepath.Join(homeDir, dataFolder)
 
 	// Extract the last path from the URL, excluding parameters.
 	// eg: URL_ADDRESS.com/path/to/file?param=value -> file
 	cleanPath := TaskFromURL(urlStr)
 
-	fullQualifyPath, err := filepath.Abs(filepath.Join(os.Getenv("HOME"), dataFolder, cleanPath))
+	fullQualifyPath, err := filepath.Abs(filepath.Join(homeDir, dataFolder, cleanPath))
 	FatalCheck(err)
 
 	//must ensure full qualify path is CHILD of safe path

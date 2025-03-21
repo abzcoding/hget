@@ -22,13 +22,6 @@ import (
 )
 
 var (
-	tr = &http.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-	}
-	client = &http.Client{Transport: tr}
-)
-
-var (
 	acceptRangeHeader   = "Accept-Ranges"
 	contentLengthHeader = "Content-Length"
 )
@@ -50,7 +43,7 @@ type HTTPDownloader struct {
 // NewHTTPDownloader returns a ProxyAwareHttpClient with given configurations.
 func NewHTTPDownloader(url string, par int, skipTLS bool, proxyServer string, bwLimit string) *HTTPDownloader {
 	var resumable = true
-	client := ProxyAwareHTTPClient(proxyServer)
+	client := ProxyAwareHTTPClient(proxyServer, skipTLS)
 
 	parsed, err := stdurl.Parse(url)
 	FatalCheck(err)
@@ -146,8 +139,10 @@ func partCalculate(par int64, len int64, url string) []Part {
 }
 
 // ProxyAwareHTTPClient returns an HTTP client that may use an HTTP or SOCKS5 proxy.
-func ProxyAwareHTTPClient(proxyServer string) *http.Client {
-	httpTransport := &http.Transport{}
+func ProxyAwareHTTPClient(proxyServer string, skipTLS bool) *http.Client {
+	httpTransport := &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: skipTLS},
+	}
 	httpClient := &http.Client{Transport: httpTransport}
 	var dialer proxy.Dialer = proxy.Direct
 
@@ -234,7 +229,7 @@ func (d *HTTPDownloader) downloadPart(part Part, bar *pb.ProgressBar, wg *sync.W
 		return
 	}
 
-	client := ProxyAwareHTTPClient(d.proxy)
+	client := ProxyAwareHTTPClient(d.proxy, d.skipTLS)
 	resp, err := client.Do(req)
 	if err != nil {
 		errorChan <- err
