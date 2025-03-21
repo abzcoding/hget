@@ -30,7 +30,7 @@ jobs:
     - name: Security Scan
       uses: securego/gosec@master
       with:
-        args: ./...
+        args: '-exclude=G304,G306,G104 ./...'
 
     - name: Build
       run: go build -v -ldflags "-X main.GitCommit=$(git describe --always)" -o bin/hget

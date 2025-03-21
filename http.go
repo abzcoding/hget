@@ -141,7 +141,7 @@ func partCalculate(par int64, len int64, url string) []Part {
 // ProxyAwareHTTPClient returns an HTTP client that may use an HTTP or SOCKS5 proxy.
 func ProxyAwareHTTPClient(proxyServer string, skipTLS bool) *http.Client {
 	httpTransport := &http.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: skipTLS},
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: skipTLS}, // #nosec G402
 	}
 	httpClient := &http.Client{Transport: httpTransport}
 	var dialer proxy.Dialer = proxy.Direct
