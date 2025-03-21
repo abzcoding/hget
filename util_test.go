@@ -1,11 +1,11 @@
 package main
 
 import (
-	"testing"
 	"path/filepath"
+	"testing"
 )
 
-func TestFilterIpV4(t *testing.T){
+func TestFilterIpV4(t *testing.T) {
 }
 
 func TestFolderOfPanic1(t *testing.T) {
@@ -28,6 +28,14 @@ func TestFolderOfPanic2(t *testing.T) {
 
 func TestFolderOfNormal(t *testing.T) {
 	url := "http://foo.bar/file"
+	u := FolderOf(url)
+	if filepath.Base(u) != "file" {
+		t.Fatalf("url of return incorrect value")
+	}
+}
+
+func TestFolderWithoutParams(t *testing.T) {
+	url := "http://foo.bar/file?param=value"
 	u := FolderOf(url)
 	if filepath.Base(u) != "file" {
 		t.Fatalf("url of return incorrect value")

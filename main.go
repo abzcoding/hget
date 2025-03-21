@@ -6,7 +6,6 @@ import (
 	"io"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"runtime"
 	"syscall"
 
@@ -110,7 +109,7 @@ func Execute(url string, state *State, conn int, skiptls bool, proxy string, bwL
 	} else {
 		downloader = &HTTPDownloader{
 			url:       state.URL,
-			file:      filepath.Base(state.URL),
+			file:      TaskFromURL(state.URL),
 			par:       int64(len(state.Parts)),
 			parts:     state.Parts,
 			resumable: true,
@@ -145,7 +144,7 @@ func Execute(url string, state *State, conn int, skiptls bool, proxy string, bwL
 					Warnf("Interrupted, but the download is not resumable. Exiting silently.\n")
 				}
 			} else {
-				err := JoinFile(files, filepath.Base(url))
+				err := JoinFile(files, TaskFromURL(url))
 				FatalCheck(err)
 				err = os.RemoveAll(FolderOf(url))
 				FatalCheck(err)
