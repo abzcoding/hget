@@ -1,8 +1,7 @@
-sudo: false
 language: go
 go:
-  - 1.15.1
-  - tip
+  - "1.23.6"
+  - stable
 script:
   - make clean install
   - go test
