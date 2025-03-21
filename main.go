@@ -10,6 +10,9 @@ import (
 	"runtime"
 	"syscall"
 
+	stdurl "net/url"
+	"strings"
+
 	"github.com/imkira/go-task"
 )
 
@@ -108,9 +111,15 @@ func Execute(url string, state *State, conn int, skiptls bool, proxy string, bwL
 	if state == nil {
 		downloader = NewHTTPDownloader(url, conn, skiptls, proxy, bwLimit)
 	} else {
+		// Extract the last path from the URL, excluding parameters.
+		// eg: URL_ADDRESS.com/path/to/file?param=value -> file
+		parsed, err := stdurl.Parse(state.URL)
+		FatalCheck(err)
+		cleanFile := filepath.Base(strings.TrimRight(parsed.Path, "/\\"))
+
 		downloader = &HTTPDownloader{
 			url:       state.URL,
-			file:      filepath.Base(state.URL),
+			file:      cleanFile,
 			par:       int64(len(state.Parts)),
 			parts:     state.Parts,
 			resumable: true,
@@ -145,7 +154,13 @@ func Execute(url string, state *State, conn int, skiptls bool, proxy string, bwL
 					Warnf("Interrupted, but the download is not resumable. Exiting silently.\n")
 				}
 			} else {
-				err := JoinFile(files, filepath.Base(url))
+				// Extract the last path from the URL, excluding parameters.
+				// eg: URL_ADDRESS.com/path/to/file?param=value -> file
+				parsed, err := stdurl.Parse(url)
+				FatalCheck(err)
+				filename := filepath.Base(strings.TrimRight(parsed.Path, "/\\"))
+
+				err = JoinFile(files, filename)
 				FatalCheck(err)
 				err = os.RemoveAll(FolderOf(url))
 				FatalCheck(err)

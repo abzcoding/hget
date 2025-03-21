@@ -2,12 +2,13 @@ package main
 
 import (
 	"errors"
-	"github.com/mattn/go-isatty"
 	"net"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/mattn/go-isatty"
 )
 
 // FatalCheck panics if err is not nil.
@@ -51,9 +52,16 @@ func DisplayProgressBar() bool {
 }
 
 // FolderOf makes sure you won't get LFI
-func FolderOf(url string) string {
+func FolderOf(urlStr string) string {
 	safePath := filepath.Join(os.Getenv("HOME"), dataFolder)
-	fullQualifyPath, err := filepath.Abs(filepath.Join(os.Getenv("HOME"), dataFolder, filepath.Base(url)))
+
+	parsedURL, err := url.Parse(urlStr)
+	FatalCheck(err)
+	// Extract the last path from the URL, excluding parameters.
+	// eg: URL_ADDRESS.com/path/to/file?param=value -> file
+	cleanPath := filepath.Base(strings.TrimRight(parsedURL.Path, "/\\"))
+
+	fullQualifyPath, err := filepath.Abs(filepath.Join(os.Getenv("HOME"), dataFolder, cleanPath))
 	FatalCheck(err)
 
 	//must ensure full qualify path is CHILD of safe path
@@ -72,11 +80,12 @@ func FolderOf(url string) string {
 }
 
 // TaskFromURL runs when you want to download a single url
-func TaskFromURL(url string) string {
-	//task is just download file name
-	//so we get download file name on url
-	filename := filepath.Base(url)
-	return filename
+func TaskFromURL(urlStr string) string {
+	// Extract the last path from the URL, excluding parameters.
+	// eg: URL_ADDRESS.com/path/to/file?param=value -> file
+	parsedURL, err := url.Parse(urlStr)
+	FatalCheck(err)
+	return filepath.Base(strings.TrimRight(parsedURL.Path, "/\\"))
 }
 
 // IsURL checks if `s` is actually a parsable URL.
