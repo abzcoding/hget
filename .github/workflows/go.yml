@@ -39,7 +39,7 @@ jobs:
       run: go test -v ./...
 
     - name: Upload Build Artifact
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: hget
         path: bin/hget
