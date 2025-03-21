@@ -95,9 +95,7 @@ func NewHTTPDownloader(url string, par int, skipTLS bool, proxyServer string, bw
 		Printf("Download target size: %.1f GB\n", sizeInMb/1024)
 	}
 
-	parsed, err = stdurl.Parse(url)
-	FatalCheck(err)
-	file := filepath.Base(strings.TrimRight(parsed.Path, "/\\"))
+	file := TaskFromURL(url)
 
 	ret := new(HTTPDownloader)
 	ret.rate = 0
@@ -131,9 +129,7 @@ func partCalculate(par int64, len int64, url string) []Part {
 			to = len
 		}
 
-		parsed, err := stdurl.Parse(url)
-		FatalCheck(err)
-		file := filepath.Base(strings.TrimRight(parsed.Path, "/\\"))
+		file := TaskFromURL(url)
 
 		folder := FolderOf(url)
 		if err := MkdirIfNotExist(folder); err != nil {

@@ -55,11 +55,9 @@ func DisplayProgressBar() bool {
 func FolderOf(urlStr string) string {
 	safePath := filepath.Join(os.Getenv("HOME"), dataFolder)
 
-	parsedURL, err := url.Parse(urlStr)
-	FatalCheck(err)
 	// Extract the last path from the URL, excluding parameters.
 	// eg: URL_ADDRESS.com/path/to/file?param=value -> file
-	cleanPath := filepath.Base(strings.TrimRight(parsedURL.Path, "/\\"))
+	cleanPath := TaskFromURL(urlStr)
 
 	fullQualifyPath, err := filepath.Abs(filepath.Join(os.Getenv("HOME"), dataFolder, cleanPath))
 	FatalCheck(err)
