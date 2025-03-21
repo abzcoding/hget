@@ -34,10 +34,14 @@ hget -file sample.txt # to download a list of urls
 hget -n 4 -rate 100KB URL # to download using 4 threads & limited to 100KB per second
 
 # real world example
-hget -n 16 -rate 10MiB "https://releases.ubuntu.com/24.04.1/ubuntu-24.04.1-desktop-amd64.iso"
+hget -n 16 -rate 10MiB "https://old-releases.ubuntu.com/releases/22.04.1/ubuntu-22.04-beta-live-server-amd64.iso"
 # resuming a stopped download
-hget -resume "ubuntu-24.04.1-desktop-amd64.iso"
+hget -resume "ubuntu-22.04-beta-live-server-amd64.iso"
 ```
+
+### Cleanup
+
+you might wanna cleanup `~/.hget` folder after downloading a lot of unfinished/cancelled downloads
 
 ### Help
 ```
@@ -54,7 +58,7 @@ Usage of hget:
   -resume string
         resume download task with given task name (or URL)
   -skip-tls
-        skip certificate verification for https (default true)
+        skip certificate verification for https (default false)
 ```
 
 To interrupt any on-downloading process, just ctrl-c or ctrl-d at the middle of the download, hget will safely save your data and you will be able to resume later
