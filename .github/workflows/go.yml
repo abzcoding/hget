@@ -1,0 +1,51 @@
+name: Go
+
+on:
+  push:
+    branches: [ "master" ]
+  pull_request:
+    branches: [ "master" ]
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        go-version: ['1.23']
+    runs-on: ${{ matrix.os }}
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: ${{ matrix.go-version }}
+
+    - name: Go Cache
+      uses: actions/cache@v3
+      with:
+        path: |
+          ~/.cache/go-build
+          ~/go/pkg/mod
+        key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-
+
+    - name: Security Scan
+      if: matrix.os == 'ubuntu-latest'
+      uses: securego/gosec@master
+      with:
+        args: ./...
+
+    - name: Build
+      run: go build -v -ldflags "-X main.GitCommit=$(git describe --always)" -o bin/hget
+
+    - name: Test
+      run: go test -v ./...
+
+    - name: Upload Build Artifact
+      uses: actions/upload-artifact@v3
+      with:
+        name: hget-${{ runner.os }}
+        path: bin/hget
+        if-no-files-found: error
