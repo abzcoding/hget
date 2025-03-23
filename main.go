@@ -122,7 +122,7 @@ func Execute(url string, state *State, conn int, skiptls bool, proxy string, bwL
 		case <-signalChan:
 			// Signal all active download routines to interrupt.
 			isInterrupted = true
-			for i := 0; i < conn; i++ {
+			for range conn {
 				interruptChan <- true
 			}
 		case file := <-fileChan:

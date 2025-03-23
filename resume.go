@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"io/ioutil"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -16,7 +15,7 @@ func TaskPrint() error {
 	homeDir := usr.HomeDir
 
 	downloadingPath := filepath.Join(homeDir, dataFolder)
-	downloading, err := ioutil.ReadDir(downloadingPath)
+	downloading, err := os.ReadDir(downloadingPath)
 	if err != nil {
 		return err
 	}
@@ -47,10 +46,7 @@ func Resume(task string) (*State, error) {
 			continue
 		}
 		downloaded := fi.Size()
-		newFrom := part.RangeFrom + downloaded
-		if newFrom >= part.RangeTo {
-			newFrom = part.RangeTo
-		}
+		newFrom := min(part.RangeFrom + downloaded, part.RangeTo)
 		Printf("Resuming part %d: skipping %d bytes, new start offset: %d\n", part.Index, downloaded, newFrom)
 		state.Parts[i].RangeFrom = newFrom
 	}

@@ -59,26 +59,32 @@ func FolderOf(urlStr string) string {
 	homeDir := usr.HomeDir
 	safePath := filepath.Join(homeDir, dataFolder)
 
-	// Extract the last path from the URL, excluding parameters.
-	// eg: URL_ADDRESS.com/path/to/file?param=value -> file
+	// Parse the URL to get the path
+	parsedURL, err := url.Parse(urlStr)
+	FatalCheck(err)
+
+	// Check for directory traversal attempts in the raw path before cleaning
+	if strings.Contains(parsedURL.Path, "..") {
+		FatalCheck(errors.New("you may be a victim of directory traversal path attack"))
+		return "" // Return is redundant because FatalCheck will panic
+	}
+
+	// Extract the last path from the URL, excluding parameters
 	cleanPath := TaskFromURL(urlStr)
 
 	fullQualifyPath, err := filepath.Abs(filepath.Join(homeDir, dataFolder, cleanPath))
 	FatalCheck(err)
 
-	//must ensure full qualify path is CHILD of safe path
-	//to prevent directory traversal attack
-	//using Rel function to get relative between parent and child
-	//if relative join base == child, then child path MUST BE real child
+	// Double-check to ensure full qualify path is CHILD of safe path
+	// to prevent directory traversal attack
 	relative, err := filepath.Rel(safePath, fullQualifyPath)
 	FatalCheck(err)
 
 	if strings.Contains(relative, "..") {
 		FatalCheck(errors.New("you may be a victim of directory traversal path attack"))
-		return "" //return is redundant be cause in fatal check we have panic, but compiler does not able to check
+		return "" // Return is redundant because FatalCheck will panic
 	}
 	return fullQualifyPath
-
 }
 
 // TaskFromURL runs when you want to download a single url
@@ -87,11 +93,18 @@ func TaskFromURL(urlStr string) string {
 	// eg: URL_ADDRESS.com/path/to/file?param=value -> file
 	parsedURL, err := url.Parse(urlStr)
 	FatalCheck(err)
-	return filepath.Base(strings.TrimRight(parsedURL.Path, "/\\"))
+	// Clean the path to remove any directory traversal attempts
+	// This ensures we only get the filename without any path manipulation
+	cleanPath := filepath.Clean(parsedURL.Path)
+	return filepath.Base(strings.TrimRight(cleanPath, "/\\"))
 }
 
 // IsURL checks if `s` is actually a parsable URL.
 func IsURL(s string) bool {
-	_, err := url.Parse(s)
-	return err == nil
+	u, err := url.Parse(s)
+	if err != nil {
+		return false
+	}
+	// Check for scheme and host to ensure it's a valid URL
+	return u.Scheme != "" && u.Host != ""
 }

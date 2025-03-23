@@ -1,34 +1,333 @@
 package main
 
 import (
+	"os"
 	"os/user"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestPartCalculate(t *testing.T) {
+	// Disable progress bar for tests
 	displayProgress = false
 
-	parts := partCalculate(int64(10), 100, "http://foo.bar/file")
-	if len(parts) != 10 {
-		t.Fatalf("parts length should be 10")
+	// Setup test environment
+	originalDataFolder := dataFolder
+	dataFolder = ".hget_test/"
+	defer func() {
+		dataFolder = originalDataFolder
+		usr, _ := user.Current()
+		testFolder := filepath.Join(usr.HomeDir, dataFolder)
+		os.RemoveAll(testFolder)
+	}()
+
+	// Test with different numbers of parts
+	testCases := []struct {
+		parts       int64
+		totalSize   int64
+		url         string
+		expectParts int
+	}{
+		{10, 100, "http://foo.bar/file", 10},
+		{5, 1000, "http://example.com/largefile", 5},
+		{1, 50, "http://test.org/smallfile", 1},
+		{3, 10, "http://tiny.file/data", 3}, // Small file, multiple parts
 	}
 
-	if parts[0].URL != "http://foo.bar/file" {
-		t.Fatalf("part url was wrong")
+	for _, tc := range testCases {
+		parts := partCalculate(tc.parts, tc.totalSize, tc.url)
+
+		// Check number of parts
+		if len(parts) != tc.expectParts {
+			t.Errorf("Expected %d parts, got %d", tc.expectParts, len(parts))
+		}
+
+		// Check part URLs
+		for i, part := range parts {
+			if part.URL != tc.url {
+				t.Errorf("Part %d: Expected URL %s, got %s", i, tc.url, part.URL)
+			}
+
+			// Check part index
+			if part.Index != int64(i) {
+				t.Errorf("Part %d: Expected Index %d, got %d", i, i, part.Index)
+			}
+
+			// Check ranges
+			expectedSize := tc.totalSize / tc.parts
+			if i < int(tc.parts-1) {
+				if part.RangeFrom != expectedSize*int64(i) {
+					t.Errorf("Part %d: Expected RangeFrom %d, got %d",
+						i, expectedSize*int64(i), part.RangeFrom)
+				}
+				if part.RangeTo != expectedSize*int64(i+1)-1 {
+					t.Errorf("Part %d: Expected RangeTo %d, got %d",
+						i, expectedSize*int64(i+1)-1, part.RangeTo)
+				}
+			} else {
+				// Last part might be larger due to division remainder
+				if part.RangeFrom != expectedSize*int64(i) {
+					t.Errorf("Part %d: Expected RangeFrom %d, got %d",
+						i, expectedSize*int64(i), part.RangeFrom)
+				}
+				if part.RangeTo != tc.totalSize {
+					t.Errorf("Part %d: Expected RangeTo %d, got %d",
+						i, tc.totalSize, part.RangeTo)
+				}
+			}
+
+			// Check path format
+			usr, _ := user.Current()
+			expectedBasePath := filepath.Join(usr.HomeDir, dataFolder)
+			if !strings.Contains(part.Path, expectedBasePath) {
+				t.Errorf("Part %d: Path does not contain expected base path: %s", i, part.Path)
+			}
+
+			fileName := filepath.Base(part.Path)
+			expectedPrefix := TaskFromURL(tc.url) + ".part"
+			if !strings.HasPrefix(fileName, expectedPrefix) {
+				t.Errorf("Part %d: Expected filename prefix %s, got %s",
+					i, expectedPrefix, fileName)
+			}
+		}
+	}
+}
+
+func TestProxyAwareHTTPClient(t *testing.T) {
+	// Test with no proxy
+	client := ProxyAwareHTTPClient("", false)
+	if client == nil {
+		t.Fatal("ProxyAwareHTTPClient returned nil with no proxy")
 	}
 
-	usr, _ := user.Current()
-	dir := filepath.Join(usr.HomeDir, dataFolder, "file/file.part000001")
-	if parts[1].Path != dir {
-		t.Fatalf("part path was wrong")
+	// Cannot easily test with an actual proxy, but can verify it doesn't crash
+	httpProxyClient := ProxyAwareHTTPClient("http://localhost:8080", false)
+	if httpProxyClient == nil {
+		t.Fatal("ProxyAwareHTTPClient returned nil with HTTP proxy")
 	}
 
-	if parts[0].RangeFrom != 0 && parts[0].RangeTo != 10 {
-		t.Fatalf("part range was wrong")
+	socksProxyClient := ProxyAwareHTTPClient("localhost:1080", false)
+	if socksProxyClient == nil {
+		t.Fatal("ProxyAwareHTTPClient returned nil with SOCKS proxy")
 	}
 
-	if parts[1].Index != 1 {
-		t.Fatal("part index was wrong")
+	// Test TLS skipVerify parameter
+	tlsClient := ProxyAwareHTTPClient("", true)
+	if tlsClient == nil {
+		t.Fatal("ProxyAwareHTTPClient returned nil with TLS skip verification")
 	}
+
+	// Can't directly access TLS config, but it shouldn't crash
+}
+
+// Helper function to parse integers
+func parseInt(s string) int {
+	n := 0
+	for _, c := range s {
+		n = n*10 + int(c-'0')
+	}
+	return n
+}
+
+func TestHandleCompletedPart(t *testing.T) {
+	// Disable progress bar for tests
+	displayProgress = false
+
+	// Create a part that's already complete
+	part := Part{
+		Index:     0,
+		URL:       "http://example.com/test",
+		Path:      "test.part000000",
+		RangeFrom: 100, // RangeFrom equals RangeTo means no data to download
+		RangeTo:   100,
+	}
+
+	// Create channels
+	fileChan := make(chan string, 1)
+	stateSaveChan := make(chan Part, 1)
+
+	// Create downloader
+	downloader := &HTTPDownloader{
+		url:       "http://example.com/test",
+		file:      "test",
+		par:       1,
+		len:       100,
+		parts:     []Part{part},
+		resumable: true,
+	}
+
+	// Handle the completed part
+	downloader.handleCompletedPart(part, fileChan, stateSaveChan)
+
+	// Verify the path was sent to fileChan
+	select {
+	case path := <-fileChan:
+		if path != part.Path {
+			t.Errorf("Expected path %s, got %s", part.Path, path)
+		}
+	default:
+		t.Errorf("No path sent to fileChan")
+	}
+
+	// Verify the part was sent to stateSaveChan
+	select {
+	case savedPart := <-stateSaveChan:
+		if savedPart.Index != part.Index ||
+			savedPart.URL != part.URL ||
+			savedPart.Path != part.Path ||
+			savedPart.RangeFrom != part.RangeFrom ||
+			savedPart.RangeTo != part.RangeTo {
+			t.Errorf("Saved part does not match original part")
+		}
+	default:
+		t.Errorf("No part sent to stateSaveChan")
+	}
+}
+
+func TestBuildRequestForPart(t *testing.T) {
+	// Test cases for different range situations
+	testCases := []struct {
+		description string
+		part        Part
+		contentLen  int64
+		parallelism int64
+		expected    string
+	}{
+		{
+			description: "Single connection download (no range)",
+			part: Part{
+				Index:     0,
+				URL:       "http://example.com/file",
+				Path:      "file.part000000",
+				RangeFrom: 0,
+				RangeTo:   100,
+			},
+			contentLen:  100,
+			parallelism: 1,
+			expected:    "", // No range header expected
+		},
+		{
+			description: "Multiple connection download with middle part",
+			part: Part{
+				Index:     1,
+				URL:       "http://example.com/file",
+				Path:      "file.part000001",
+				RangeFrom: 50,
+				RangeTo:   99,
+			},
+			contentLen:  200,
+			parallelism: 3,
+			expected:    "bytes=50-99",
+		},
+		{
+			description: "Multiple connection download with last part",
+			part: Part{
+				Index:     2,
+				URL:       "http://example.com/file",
+				Path:      "file.part000002",
+				RangeFrom: 100,
+				RangeTo:   200,
+			},
+			contentLen:  200,
+			parallelism: 3,
+			expected:    "bytes=100-",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.description, func(t *testing.T) {
+			// Create downloader
+			downloader := &HTTPDownloader{
+				url:       tc.part.URL,
+				file:      "file",
+				par:       tc.parallelism,
+				len:       tc.contentLen,
+				parts:     []Part{tc.part},
+				resumable: true,
+			}
+
+			// Build request
+			req, err := downloader.buildRequestForPart(tc.part)
+			if err != nil {
+				t.Fatalf("buildRequestForPart failed: %v", err)
+			}
+
+			// Check range header
+			rangeHeader := req.Header.Get("Range")
+			if tc.expected == "" {
+				if rangeHeader != "" {
+					t.Errorf("Expected no Range header, got '%s'", rangeHeader)
+				}
+			} else {
+				if rangeHeader != tc.expected {
+					t.Errorf("Expected Range header '%s', got '%s'", tc.expected, rangeHeader)
+				}
+			}
+
+			// Check URL
+			if req.URL.String() != tc.part.URL {
+				t.Errorf("Expected URL %s, got %s", tc.part.URL, req.URL.String())
+			}
+		})
+	}
+}
+
+func TestCopyContent(t *testing.T) {
+	// Create test data
+	testData := "This is test data for copy content"
+
+	// Test regular copy (no rate limit)
+	t.Run("No Rate Limit", func(t *testing.T) {
+		// Create source and destination
+		src := strings.NewReader(testData)
+		var dst strings.Builder
+
+		// Create downloader with no rate limit
+		downloader := &HTTPDownloader{
+			rate: 0,
+		}
+
+		// Copy content
+		done := make(chan bool)
+		go downloader.copyContent(src, &dst, done)
+
+		// Wait for completion
+		<-done
+
+		// Verify copied content
+		if dst.String() != testData {
+			t.Errorf("Expected content '%s', got '%s'", testData, dst.String())
+		}
+	})
+
+	// Test copy with rate limit (can only test that it doesn't crash)
+	t.Run("With Rate Limit", func(t *testing.T) {
+		// Create source and destination
+		src := strings.NewReader(testData)
+		var dst strings.Builder
+
+		// Create downloader with rate limit
+		downloader := &HTTPDownloader{
+			rate: 1024, // 1KB/s
+		}
+
+		// Copy content
+		done := make(chan bool)
+		go downloader.copyContent(src, &dst, done)
+
+		// Wait for completion with timeout
+		select {
+		case <-done:
+			// Success
+		case <-time.After(2 * time.Second):
+			t.Fatalf("Copy with rate limit timed out")
+		}
+
+		// Verify copied content
+		if dst.String() != testData {
+			t.Errorf("Expected content '%s', got '%s'", testData, dst.String())
+		}
+	})
 }
