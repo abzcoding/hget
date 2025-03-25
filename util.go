@@ -75,15 +75,10 @@ func FolderOf(urlStr string) string {
 	fullQualifyPath, err := filepath.Abs(filepath.Join(homeDir, dataFolder, cleanPath))
 	FatalCheck(err)
 
-	// Double-check to ensure full qualify path is CHILD of safe path
-	// to prevent directory traversal attack
-	relative, err := filepath.Rel(safePath, fullQualifyPath)
-	FatalCheck(err)
-
-	if strings.Contains(relative, "..") {
-		FatalCheck(errors.New("you may be a victim of directory traversal path attack"))
-		return "" // Return is redundant because FatalCheck will panic
+	if !strings.HasPrefix(fullQualifyPath, safePath) {
+		FatalCheck(errors.New("path traversal attempt detected"))
 	}
+
 	return fullQualifyPath
 }
 
