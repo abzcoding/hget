@@ -166,14 +166,12 @@ func TestHandleCompletedPart(t *testing.T) {
 	// Handle the completed part
 	downloader.handleCompletedPart(part, fileChan, stateSaveChan)
 
-	// Verify the path was sent to fileChan
+	// We no longer send file paths via fileChan in handleCompletedPart
 	select {
-	case path := <-fileChan:
-		if path != part.Path {
-			t.Errorf("Expected path %s, got %s", part.Path, path)
-		}
+	case <-fileChan:
+		t.Errorf("Did not expect path to be sent to fileChan")
 	default:
-		t.Errorf("No path sent to fileChan")
+		// ok
 	}
 
 	// Verify the part was sent to stateSaveChan
