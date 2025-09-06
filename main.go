@@ -154,6 +154,11 @@ func Execute(url string, state *State, conn int, skiptls bool, proxy string, bwL
 				part := <-stateChan
 				parts = append(parts, part)
 			}
+			// Build file list from final part states to avoid missing/duplicate paths
+			files = make([]string, 0, len(parts))
+			for _, p := range parts {
+				files = append(files, p.Path)
+			}
 			if isInterrupted {
 				if downloader.resumable {
 					Printf("Interrupted, saving state...\n")

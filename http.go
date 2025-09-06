@@ -333,7 +333,7 @@ func (d *HTTPDownloader) Do(doneChan chan bool, fileChan chan string, errorChan 
 
 // handleCompletedPart simply notifies that a part doesn't need downloading.
 func (d *HTTPDownloader) handleCompletedPart(p Part, fileChan chan string, stateSaveChan chan Part) {
-	fileChan <- p.Path
+	// Avoid sending path here; we'll assemble paths from final states in main
 	// Send a part indicating no additional data
 	stateSaveChan <- Part{
 		Index:     p.Index,
