@@ -170,6 +170,21 @@ func Execute(url string, state *State, conn int, skiptls bool, proxy string, bwL
 					Warnf("Interrupted, but the download is not resumable. Exiting silently.\n")
 				}
 			} else {
+				// Rebuild files from folder to avoid any missing/duplicate paths from channels
+				folder := FolderOf(url)
+				entries, readErr := os.ReadDir(folder)
+				FatalCheck(readErr)
+				files = files[:0]
+				prefix := TaskFromURL(url) + ".part"
+				for _, e := range entries {
+					if e.IsDir() {
+						continue
+					}
+					name := e.Name()
+					if strings.HasPrefix(name, prefix) {
+						files = append(files, folder+string(os.PathSeparator)+name)
+					}
+				}
 				err := JoinFile(files, TaskFromURL(url))
 				FatalCheck(err)
 				err = os.RemoveAll(FolderOf(url))
