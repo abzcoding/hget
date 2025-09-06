@@ -9,13 +9,13 @@ require (
 	github.com/imkira/go-task v1.0.0
 	github.com/mattn/go-colorable v0.1.14
 	github.com/mattn/go-isatty v0.0.20
-	golang.org/x/net v0.37.0
+	golang.org/x/net v0.43.0
+	golang.org/x/time v0.12.0
 	gopkg.in/cheggaaa/pb.v1 v1.0.28
 )
 
 require (
 	github.com/mattn/go-runewidth v0.0.16 // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
-	golang.org/x/sys v0.31.0 // indirect
-	golang.org/x/time v0.10.0 // indirect
+	golang.org/x/sys v0.35.0 // indirect
 )

@@ -1,11 +1,12 @@
 package main
 
 import (
-	"github.com/fatih/color"
-	"gopkg.in/cheggaaa/pb.v1"
 	"io"
 	"os"
 	"sort"
+
+	"github.com/fatih/color"
+	"gopkg.in/cheggaaa/pb.v1"
 )
 
 // JoinFile joins seperate chunks of file and forms the final downloaded artifact
@@ -20,10 +21,10 @@ func JoinFile(files []string, out string) error {
 	}
 
 	outf, err := os.OpenFile(out, os.O_CREATE|os.O_WRONLY, 0600)
-	defer outf.Close()
 	if err != nil {
 		return err
 	}
+	defer outf.Close()
 
 	for _, f := range files {
 		if err = copy(f, outf); err != nil {
@@ -41,13 +42,13 @@ func JoinFile(files []string, out string) error {
 	return nil
 }
 
-//this function split just to use defer
+// this function split just to use defer
 func copy(from string, to io.Writer) error {
 	f, err := os.OpenFile(from, os.O_RDONLY, 0600)
-	defer f.Close()
 	if err != nil {
 		return err
 	}
+	defer f.Close()
 	io.Copy(to, f)
 	return nil
 }

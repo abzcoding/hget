@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"strings"
 	"syscall"
 
 	"github.com/imkira/go-task"
@@ -24,9 +25,16 @@ func main() {
 	flag.StringVar(&filePath, "file", "", "path to a file that contains one URL per line")
 	flag.StringVar(&bwLimit, "rate", "", "bandwidth limit during download, e.g. -rate 10kB or -rate 10MiB")
 	flag.StringVar(&resumeTask, "resume", "", "resume download task with given task name (or URL)")
+	probe := flag.String("probe", "", "probe URL for range and content-length without downloading")
 
 	flag.Parse()
 	args := flag.Args()
+
+	// Probe diagnostics mode
+	if *probe != "" {
+		DebugProbe(*probe, *skiptls, proxy)
+		return
+	}
 
 	// If the resume flag is provided, use that path (ignoring other arguments)
 	if resumeTask != "" {
@@ -57,7 +65,10 @@ func main() {
 			if err == io.EOF {
 				break
 			}
-			url := string(line)
+			url := strings.TrimSpace(string(line))
+			if url == "" || strings.HasPrefix(url, "#") {
+				continue
+			}
 			// Add the download task for each URL
 			g1.AddChild(downloadTask(url, nil, *conn, *skiptls, proxy, bwLimit))
 		}
@@ -122,7 +133,7 @@ func Execute(url string, state *State, conn int, skiptls bool, proxy string, bwL
 		case <-signalChan:
 			// Signal all active download routines to interrupt.
 			isInterrupted = true
-			for range conn {
+			for i := 0; i < conn; i++ {
 				interruptChan <- true
 			}
 		case file := <-fileChan:
@@ -133,6 +144,16 @@ func Execute(url string, state *State, conn int, skiptls bool, proxy string, bwL
 		case part := <-stateChan:
 			parts = append(parts, part)
 		case <-doneChan:
+			// Ensure we drain remaining part notifications before finalizing.
+			numParts := len(downloader.parts)
+			for len(files) < numParts {
+				file := <-fileChan
+				files = append(files, file)
+			}
+			for len(parts) < numParts {
+				part := <-stateChan
+				parts = append(parts, part)
+			}
 			if isInterrupted {
 				if downloader.resumable {
 					Printf("Interrupted, saving state...\n")
@@ -156,15 +177,16 @@ func Execute(url string, state *State, conn int, skiptls bool, proxy string, bwL
 
 func usage() {
 	Printf(`Usage:
-hget [options] URL
-hget [options] --resume=TaskName
+ hget [options] URL
+ hget [options] --resume=TaskName
 
-Options:
-  -n int          number of connections (default number of CPUs)
-  -skip-tls bool  skip certificate verification for https (default false)
-  -proxy string   proxy address (e.g., '127.0.0.1:12345' for socks5 or 'http://proxy.com:8080')
-  -file string    file path containing URLs (one per line)
-  -rate string    bandwidth limit during download (e.g., 10kB, 10MiB)
-  -resume string  resume a stopped download by providing its task name or URL
-`)
+ Options:
+   -n int          number of connections (default number of CPUs)
+   -skip-tls bool  skip certificate verification for https (default false)
+   -proxy string   proxy address (e.g., '127.0.0.1:12345' for socks5 or 'http://proxy.com:8080')
+   -file string    file path containing URLs (one per line)
+   -rate string    bandwidth limit during download (e.g., 10kB, 10MiB)
+   -resume string  resume a stopped download by providing its task name or URL
+   -probe string   probe URL for range and content-length without downloading
+ `)
 }

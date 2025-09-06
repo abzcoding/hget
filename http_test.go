@@ -1,12 +1,17 @@
 package main
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/user"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/time/rate"
 )
 
 func TestPartCalculate(t *testing.T) {
@@ -249,7 +254,7 @@ func TestBuildRequestForPart(t *testing.T) {
 			}
 
 			// Build request
-			req, err := downloader.buildRequestForPart(tc.part)
+			req, err := downloader.buildRequestForPart(context.Background(), tc.part)
 			if err != nil {
 				t.Fatalf("buildRequestForPart failed: %v", err)
 			}
@@ -330,4 +335,108 @@ func TestCopyContent(t *testing.T) {
 			t.Errorf("Expected content '%s', got '%s'", testData, dst.String())
 		}
 	})
+}
+
+func TestCopyContentWithSharedLimiter(t *testing.T) {
+	// Verify copyContent path using sharedLimiter copies data correctly.
+	testData := "shared limiter content"
+	src := strings.NewReader(testData)
+	var dst strings.Builder
+
+	downloader := &HTTPDownloader{
+		sharedLimiter: rate.NewLimiter(rate.Limit(1<<20), 1<<20), // high limit to avoid slowness
+	}
+
+	done := make(chan bool)
+	go downloader.copyContent(src, &dst, done)
+	<-done
+
+	if dst.String() != testData {
+		t.Errorf("Expected content '%s', got '%s'", testData, dst.String())
+	}
+}
+
+func TestProxyAwareHTTPClientConfiguration(t *testing.T) {
+	// HTTP proxy config should set Transport.Proxy
+	client := ProxyAwareHTTPClient("http://127.0.0.1:3128", false)
+	tr, ok := client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("Transport is not *http.Transport")
+	}
+	if tr.Proxy == nil {
+		t.Errorf("expected HTTP proxy to be configured on Transport.Proxy")
+	}
+
+	// SOCKS5 proxy config should set DialContext
+	client = ProxyAwareHTTPClient("127.0.0.1:1080", false)
+	tr, ok = client.Transport.(*http.Transport)
+	if !ok || tr.DialContext == nil {
+		t.Errorf("expected SOCKS5 DialContext to be configured")
+	}
+
+	// Ensure timeouts are set
+	if tr.TLSHandshakeTimeout == 0 || tr.ResponseHeaderTimeout == 0 || tr.ExpectContinueTimeout == 0 {
+		t.Errorf("expected transport timeouts to be set")
+	}
+}
+
+func TestNewHTTPDownloaderProbe(t *testing.T) {
+	// HEAD returns Accept-Ranges and Content-Length
+	content := strings.Repeat("x", 1024)
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodHead:
+			w.Header().Set("Accept-Ranges", "bytes")
+			w.Header().Set("Content-Length", "1024")
+			w.WriteHeader(http.StatusOK)
+		case http.MethodGet:
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(content))
+		}
+	})
+	ts := httptest.NewServer(h)
+	defer ts.Close()
+
+	d := NewHTTPDownloader(ts.URL, 4, false, "", "")
+	if d.par != 4 {
+		t.Fatalf("expected par=4, got %d", d.par)
+	}
+	if d.len != 1024 {
+		t.Fatalf("expected len=1024, got %d", d.len)
+	}
+	if !d.resumable {
+		t.Fatalf("expected resumable=true")
+	}
+	if len(d.parts) != 4 {
+		t.Fatalf("expected 4 parts, got %d", len(d.parts))
+	}
+}
+
+func TestNewHTTPDownloaderRangeFallback(t *testing.T) {
+	// HEAD has no Accept-Ranges/Content-Length. GET with Range returns 206 + Content-Range
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodHead:
+			w.WriteHeader(http.StatusOK)
+		case http.MethodGet:
+			if rng := r.Header.Get("Range"); strings.HasPrefix(rng, "bytes=") {
+				w.Header().Set("Content-Range", "bytes 0-0/4096")
+				w.WriteHeader(http.StatusPartialContent)
+				_, _ = w.Write([]byte("x"))
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(strings.Repeat("x", 4096)))
+		}
+	})
+	ts := httptest.NewServer(h)
+	defer ts.Close()
+
+	d := NewHTTPDownloader(ts.URL, 4, false, "", "")
+	if d.par != 4 {
+		t.Fatalf("expected par=4, got %d", d.par)
+	}
+	if d.len != 4096 {
+		t.Fatalf("expected len=4096, got %d", d.len)
+	}
 }
