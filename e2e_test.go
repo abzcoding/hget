@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -281,5 +282,67 @@ func TestE2EGlobalRateLimit(t *testing.T) {
 	got, err := os.ReadFile(out)
 	if err != nil || !bytes.Equal(got, content) {
 		t.Fatalf("download mismatch or error: %v", err)
+	}
+}
+
+func TestE2EInterruptCancelsAndSavesState(t *testing.T) {
+	displayProgress = false
+	restoreCwd := withTempCwd(t)
+	defer restoreCwd()
+	restoreDF := withTestDataFolder(t)
+	defer restoreDF()
+
+	content := makeContent(5 * 1024 * 1024) // 5MB
+	path := "/sigint.bin"
+	ts, _ := startTestServer(t, content, true, true, true, true, path)
+	url := ts.URL + path
+
+	// Send SIGINT shortly after starting the download to simulate Ctrl+C.
+	doneSig := make(chan struct{})
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		_ = syscall.Kill(os.Getpid(), syscall.SIGINT)
+		close(doneSig)
+	}()
+
+	start := time.Now()
+	Execute(url, nil, 4, false, "", "50KB")
+	<-doneSig
+	dur := time.Since(start)
+
+	// We expect Execute to return promptly after the interrupt.
+	if dur > 10*time.Second {
+		t.Fatalf("interrupt handling too slow: %v", dur)
+	}
+
+	// State should be saved, and final joined file should not exist.
+	usr, _ := user.Current()
+	folder := filepath.Join(usr.HomeDir, dataFolder, TaskFromURL(url))
+	statePath := filepath.Join(folder, stateFileName)
+	if _, err := os.Stat(statePath); err != nil {
+		t.Fatalf("expected state saved at %s, got err=%v", statePath, err)
+	}
+	if _, err := os.Stat(TaskFromURL(url)); err == nil {
+		t.Fatalf("unexpected final file created despite interrupt")
+	}
+
+	// At least one part file should exist in the folder.
+	entries, err := os.ReadDir(folder)
+	if err != nil {
+		t.Fatalf("failed to read folder: %v", err)
+	}
+	foundPart := false
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if strings.HasPrefix(name, TaskFromURL(url)+".part") {
+			foundPart = true
+			break
+		}
+	}
+	if !foundPart {
+		t.Fatalf("expected part files in %s after interrupt", folder)
 	}
 }
