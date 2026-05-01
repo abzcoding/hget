@@ -61,11 +61,13 @@ var (
 			Foreground(colorGreen).
 			Width(14)
 
-	styleHelp   = lipgloss.NewStyle().Foreground(colorMuted)
-	styleDone   = lipgloss.NewStyle().Foreground(colorGreen).Bold(true)
-	styleETA    = lipgloss.NewStyle().Foreground(colorYellow)
-	styleError  = lipgloss.NewStyle().Foreground(colorRed).Bold(true)
-	styleErrBox = lipgloss.NewStyle().
+	styleHelp      = lipgloss.NewStyle().Foreground(colorMuted)
+	styleDone      = lipgloss.NewStyle().Foreground(colorGreen).Bold(true)
+	styleETA       = lipgloss.NewStyle().Foreground(colorYellow)
+	styleError     = lipgloss.NewStyle().Foreground(colorRed).Bold(true)
+	styleVerifyOK  = lipgloss.NewStyle().Foreground(colorGreen).Bold(true)
+	styleVerifyBad = lipgloss.NewStyle().Foreground(colorRed).Bold(true)
+	styleErrBox    = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(colorRed).
 			Padding(0, 2).
@@ -115,11 +117,20 @@ type LogMsg struct {
 	Text  string
 }
 
-// DownloadDoneMsg signals the entire pipeline (download + join) finished successfully.
+// DownloadDoneMsg signals the entire pipeline (download + join + optional verify) finished.
 type DownloadDoneMsg struct{}
 
 // DownloadErrorMsg signals a fatal download error.
 type DownloadErrorMsg struct{ Err error }
+
+// VerifyStartMsg signals GPG signature verification has begun.
+type VerifyStartMsg struct{}
+
+// VerifyDoneMsg signals GPG verification has completed.
+type VerifyDoneMsg struct {
+	OK     bool
+	Detail string // gpg output excerpt
+}
 
 // tickMsg drives periodic speed recalculation and spring animation.
 type tickMsg time.Time
@@ -186,12 +197,19 @@ type tuiModel struct {
 	maxLogs int
 
 	// lifecycle
-	started  bool
-	done     bool
-	errMsg   string
-	hasError bool
+	started    bool
+	done       bool
+	errMsg     string
+	hasError   bool
+	willVerify bool // set when --verify flag was requested
 
-	// spinner (pre-start)
+	// verification state (populated after download+join complete)
+	verifying    bool
+	verifyDone   bool
+	verifyOK     bool
+	verifyDetail string
+
+	// spinner (pre-start and verify)
 	spinner spinner.Model
 
 	// terminal width
@@ -202,7 +220,7 @@ type tuiModel struct {
 var Program *tea.Program
 
 // NewTUIModel creates a new TUI model for the given number of connections.
-func NewTUIModel(numConns int) tuiModel {
+func NewTUIModel(numConns int, willVerify bool) tuiModel {
 	s := spinner.New()
 	s.Spinner = spinner.Points
 	s.Style = lipgloss.NewStyle().Foreground(colorPurple)
@@ -211,6 +229,7 @@ func NewTUIModel(numConns int) tuiModel {
 		maxLogs:       5,
 		spinner:       s,
 		width:         80,
+		willVerify:    willVerify,
 		overallSpring: harmonica.NewSpring(harmonica.FPS(60), 7.0, 0.85),
 		joinSpring:    harmonica.NewSpring(harmonica.FPS(60), 7.0, 0.85),
 	}
@@ -369,6 +388,17 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case VerifyStartMsg:
+		m.verifying = true
+		return m, m.spinner.Tick
+
+	case VerifyDoneMsg:
+		m.verifying = false
+		m.verifyDone = true
+		m.verifyOK = msg.OK
+		m.verifyDetail = msg.Detail
+		return m, nil
+
 	case DownloadDoneMsg:
 		m.done = true
 		return m, autoQuitCmd()
@@ -488,8 +518,35 @@ func (m tuiModel) View() string {
 		b.WriteString(styleLabel.Render("  Time") + "   " + styleValue.Render(formatDuration(elapsed)) + "\n")
 		b.WriteString(styleLabel.Render("  Avg") + "    " + styleValue.Render(formatSpeed(avg)) + "\n")
 		b.WriteString(styleLabel.Render("  Saved") + "  " + styleValue.Render(m.fileName) + "\n")
+		// Verification result row.
+		if m.willVerify {
+			b.WriteString(styleLabel.Render("  Sig") + "    ")
+			if m.verifyDone {
+				if m.verifyOK {
+					b.WriteString(styleVerifyOK.Render("✓ Valid") + "\n")
+				} else {
+					b.WriteString(styleVerifyBad.Render("✗ Invalid") + "\n")
+					if m.verifyDetail != "" {
+						lines := strings.SplitN(strings.TrimSpace(m.verifyDetail), "\n", 3)
+						for _, l := range lines {
+							b.WriteString("         " + styleLogError.Render(truncate(l, w-11)) + "\n")
+						}
+					}
+				}
+			} else {
+				b.WriteString(m.spinner.View() + "  Verifying…\n")
+			}
+		}
 		b.WriteString("\n" + sep + "\n")
 		b.WriteString(styleHelp.Render("  closing in 3 s  •  q quit now"))
+		return b.String()
+	}
+
+	// Verifying phase (download+join complete, waiting for GPG result).
+	if m.verifying && !m.done {
+		b.WriteString("  " + m.spinner.View() + "  Verifying GPG signature…\n")
+		b.WriteString(sep + "\n")
+		b.WriteString(styleHelp.Render("  q quit"))
 		return b.String()
 	}
 
@@ -724,7 +781,7 @@ func DisplayProgressBar() bool {
 
 // NewProgram creates and starts a new Bubble Tea program for the TUI.
 func NewProgram(numConns int) *tea.Program {
-	model := NewTUIModel(numConns)
+	model := NewTUIModel(numConns, false)
 	return tea.NewProgram(model, tea.WithAltScreen())
 }
 
