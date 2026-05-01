@@ -1,19 +1,21 @@
-package main
+package joiner
 
 import (
 	"fmt"
 	"io"
 	"os"
 	"sort"
+
+	"github.com/abzcoding/hget/internal/ui"
 )
 
 // JoinFile joins separate chunks and assembles the final downloaded artifact.
 func JoinFile(files []string, out string) error {
 	sort.Strings(files)
 
-	Printf("Start joining %d parts\n", len(files))
-	if Program != nil {
-		Program.Send(JoinStartMsg{Total: len(files)})
+	ui.Printf("Start joining %d parts\n", len(files))
+	if ui.Program != nil {
+		ui.Program.Send(ui.JoinStartMsg{Total: len(files)})
 	}
 
 	outf, err := os.OpenFile(out, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
@@ -26,13 +28,13 @@ func JoinFile(files []string, out string) error {
 		if err = copyChunk(f, outf); err != nil {
 			return err
 		}
-		if Program != nil {
-			Program.Send(JoinProgressMsg{Current: i + 1})
+		if ui.Program != nil {
+			ui.Program.Send(ui.JoinProgressMsg{Current: i + 1})
 		}
 	}
 
-	if Program != nil {
-		Program.Send(JoinDoneMsg{})
+	if ui.Program != nil {
+		ui.Program.Send(ui.JoinDoneMsg{})
 	}
 	return nil
 }

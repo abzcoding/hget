@@ -1,4 +1,4 @@
-package main
+package state
 
 import (
 	"encoding/json"
@@ -6,30 +6,29 @@ import (
 	"os/user"
 	"path/filepath"
 	"testing"
+
+	"github.com/abzcoding/hget/internal/util"
 )
 
-// Test setup and cleanup helpers
 func prepareResume(t *testing.T, url string, parts []Part) (string, string) {
-	// Create a temporary state file and part files for testing resume
+	t.Helper()
 	usr, _ := user.Current()
 	homeDir := usr.HomeDir
-	taskName := TaskFromURL(url)
-	folderPath := filepath.Join(homeDir, dataFolder, taskName)
-	stateFilePath := filepath.Join(folderPath, stateFileName)
+	taskName := util.TaskFromURL(url)
+	folderPath := filepath.Join(homeDir, DataFolder, taskName)
+	stateFilePath := filepath.Join(folderPath, StateFileName)
 
-	// Create the folder
 	err := os.MkdirAll(folderPath, 0755)
 	if err != nil {
 		t.Fatalf("Failed to create test directory: %v", err)
 	}
 
-	// Create the state file
-	state := &State{
+	st := &State{
 		URL:   url,
 		Parts: parts,
 	}
 
-	stateData, err := json.Marshal(state)
+	stateData, err := json.Marshal(st)
 	if err != nil {
 		t.Fatalf("Failed to marshal test state: %v", err)
 	}
@@ -39,13 +38,11 @@ func prepareResume(t *testing.T, url string, parts []Part) (string, string) {
 		t.Fatalf("Failed to write test state file: %v", err)
 	}
 
-	// Create part files with some content to simulate partial downloads
 	for _, part := range parts {
 		partPath := filepath.Join(folderPath, filepath.Base(part.Path))
-		// Write different amounts of data to each part file to test resuming
-		contentSize := part.RangeFrom / 2 // Arbitrary formula for test data size
+		contentSize := part.RangeFrom / 2
 		if contentSize == 0 {
-			contentSize = 10 // Minimum size for test
+			contentSize = 10
 		}
 		content := make([]byte, contentSize)
 		err = os.WriteFile(partPath, content, 0644)
@@ -57,25 +54,19 @@ func prepareResume(t *testing.T, url string, parts []Part) (string, string) {
 	return folderPath, taskName
 }
 
-func cleanupResume(folderPath string) {
-	os.RemoveAll(folderPath)
-}
-
 func TestTaskPrint(t *testing.T) {
-	// Setup test environment
-	originalDataFolder := dataFolder
-	dataFolder = ".hget_test/"
+	originalDataFolder := DataFolder
+	DataFolder = ".hget_test/"
 	defer func() {
-		dataFolder = originalDataFolder
+		DataFolder = originalDataFolder
 		usr, _ := user.Current()
-		testFolder := filepath.Join(usr.HomeDir, dataFolder)
+		testFolder := filepath.Join(usr.HomeDir, DataFolder)
 		os.RemoveAll(testFolder)
 	}()
 
-	// Create a few test download directories
 	usr, _ := user.Current()
 	homeDir := usr.HomeDir
-	testFolder := filepath.Join(homeDir, dataFolder)
+	testFolder := filepath.Join(homeDir, DataFolder)
 
 	err := os.MkdirAll(testFolder, 0755)
 	if err != nil {
@@ -90,44 +81,30 @@ func TestTaskPrint(t *testing.T) {
 		}
 	}
 
-	// Create a file too (should be ignored by TaskPrint)
 	testFile := filepath.Join(testFolder, "testfile.txt")
 	err = os.WriteFile(testFile, []byte("test content"), 0644)
 	if err != nil {
 		t.Fatalf("Failed to create test file: %v", err)
 	}
 
-	// Test TaskPrint
 	err = TaskPrint()
 	if err != nil {
 		t.Fatalf("TaskPrint() failed: %v", err)
 	}
-
-	// Note: We can't easily check stdout, but we've verified the function executes without error
 }
 
 func TestResumeNonExistent(t *testing.T) {
-	// Setup test environment
-	originalDataFolder := dataFolder
-	dataFolder = ".hget_test/"
+	originalDataFolder := DataFolder
+	DataFolder = ".hget_test/"
 	defer func() {
-		dataFolder = originalDataFolder
+		DataFolder = originalDataFolder
 		usr, _ := user.Current()
-		testFolder := filepath.Join(usr.HomeDir, dataFolder)
+		testFolder := filepath.Join(usr.HomeDir, DataFolder)
 		os.RemoveAll(testFolder)
 	}()
 
-	// Test resuming a non-existent task
 	_, err := Resume("nonexistent-task")
 	if err == nil {
 		t.Errorf("Expected error when resuming non-existent task, got nil")
 	}
-}
-
-// Go 1.21 has min function built-in, but for compatibility with older Go versions
-func min(a, b int64) int64 {
-	if a < b {
-		return a
-	}
-	return b
 }

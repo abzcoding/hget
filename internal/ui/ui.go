@@ -1,4 +1,4 @@
-package main
+package ui
 
 import (
 	"fmt"
@@ -13,9 +13,14 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/harmonica"
 	"github.com/charmbracelet/lipgloss"
+	charmlog "github.com/charmbracelet/log"
 	"github.com/mattn/go-colorable"
 	"github.com/mattn/go-isatty"
 )
+
+// DisplayProgress controls whether the TUI progress bar is shown.
+// Set to false in tests to disable TUI output.
+var DisplayProgress = true
 
 // ── Colors ────────────────────────────────────────────────────────────────────
 
@@ -196,7 +201,8 @@ type tuiModel struct {
 // Program is the global tea.Program; goroutines call Program.Send() to deliver messages.
 var Program *tea.Program
 
-func newTUIModel(numConns int) tuiModel {
+// NewTUIModel creates a new TUI model for the given number of connections.
+func NewTUIModel(numConns int) tuiModel {
 	s := spinner.New()
 	s.Spinner = spinner.Points
 	s.Style = lipgloss.NewStyle().Foreground(colorPurple)
@@ -616,13 +622,40 @@ func formatDuration(d time.Duration) string {
 	return fmt.Sprintf("%02d:%02d", m, s)
 }
 
-// ── Non-TUI console fallback ──────────────────────────────────────────────────
+// ── Console logging ───────────────────────────────────────────────────────────
 
 var (
-	Stdout     = colorable.NewColorableStdout()
-	Stderr     = colorable.NewColorableStderr()
-	Default UI = Console{Stdout: Stdout, Stderr: Stderr}
+	Stdout    = colorable.NewColorableStdout()
+	Stderr    = colorable.NewColorableStderr()
+	DefaultUI = Console{Stdout: Stdout, Stderr: Stderr}
+
+	// Log is the global structured console logger used when the TUI is inactive.
+	// It uses charmbracelet/log with custom lipgloss styles matching the TUI palette.
+	Log *charmlog.Logger
 )
+
+func init() {
+	Log = charmlog.NewWithOptions(Stdout, charmlog.Options{
+		ReportTimestamp: false,
+	})
+	styles := charmlog.DefaultStyles()
+	styles.Levels[charmlog.InfoLevel] = lipgloss.NewStyle().
+		SetString(" INFO").
+		Padding(0, 1, 0, 1).
+		Foreground(colorCyan).
+		Bold(true)
+	styles.Levels[charmlog.WarnLevel] = lipgloss.NewStyle().
+		SetString(" WARN").
+		Padding(0, 1, 0, 1).
+		Foreground(colorYellow).
+		Bold(true)
+	styles.Levels[charmlog.ErrorLevel] = lipgloss.NewStyle().
+		SetString("ERROR").
+		Padding(0, 1, 0, 1).
+		Foreground(colorRed).
+		Bold(true)
+	Log.SetStyles(styles)
+}
 
 // UI represents simple IO output.
 type UI interface {
@@ -635,40 +668,48 @@ type UI interface {
 // Printf outputs information-level logs, routing to TUI when available.
 func Printf(format string, a ...any) (n int, err error) {
 	msg := fmt.Sprintf(format, a...)
+	trimmed := strings.TrimRight(msg, "\n")
 	if Program != nil {
-		Program.Send(LogMsg{Level: "info", Text: strings.TrimRight(msg, "\n")})
+		Program.Send(LogMsg{Level: "info", Text: trimmed})
 		return len(msg), nil
 	}
-	return fmt.Fprintf(Stdout, "\033[36mINFO: \033[0m"+format, a...)
+	Log.Info(trimmed)
+	return len(msg), nil
 }
 
 // Errorf outputs error-level logs, routing to TUI when available.
 func Errorf(format string, a ...any) (n int, err error) {
 	msg := fmt.Sprintf(format, a...)
+	trimmed := strings.TrimRight(msg, "\n")
 	if Program != nil {
-		Program.Send(LogMsg{Level: "error", Text: strings.TrimRight(msg, "\n")})
+		Program.Send(LogMsg{Level: "error", Text: trimmed})
 		return len(msg), nil
 	}
-	return fmt.Fprintf(Stderr, "\033[31mERROR: \033[0m"+format, a...)
+	Log.Error(trimmed)
+	return len(msg), nil
 }
 
 // Warnf outputs warning-level logs, routing to TUI when available.
 func Warnf(format string, a ...any) (n int, err error) {
 	msg := fmt.Sprintf(format, a...)
+	trimmed := strings.TrimRight(msg, "\n")
 	if Program != nil {
-		Program.Send(LogMsg{Level: "warn", Text: strings.TrimRight(msg, "\n")})
+		Program.Send(LogMsg{Level: "warn", Text: trimmed})
 		return len(msg), nil
 	}
-	return fmt.Fprintf(Stderr, "\033[33mWARN: \033[0m"+format, a...)
+	Log.Warn(trimmed)
+	return len(msg), nil
 }
 
 // Errorln is the non-formatted error printer.
 func Errorln(a ...any) (n int, err error) {
+	msg := fmt.Sprint(a...)
 	if Program != nil {
-		Program.Send(LogMsg{Level: "error", Text: fmt.Sprint(a...)})
+		Program.Send(LogMsg{Level: "error", Text: msg})
 		return 0, nil
 	}
-	return fmt.Fprintln(Stderr, a...)
+	Log.Error(msg)
+	return 0, nil
 }
 
 // IsTerminal checks if f is connected to a real TTY.
@@ -678,7 +719,13 @@ func IsTerminal(f *os.File) bool {
 
 // DisplayProgressBar returns true when running in interactive TTY mode.
 func DisplayProgressBar() bool {
-	return isatty.IsTerminal(os.Stdout.Fd()) && displayProgress
+	return isatty.IsTerminal(os.Stdout.Fd()) && DisplayProgress
+}
+
+// NewProgram creates and starts a new Bubble Tea program for the TUI.
+func NewProgram(numConns int) *tea.Program {
+	model := NewTUIModel(numConns)
+	return tea.NewProgram(model, tea.WithAltScreen())
 }
 
 // Console is the non-TUI implementation of UI.

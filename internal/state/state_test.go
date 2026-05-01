@@ -1,4 +1,4 @@
-package main
+package state
 
 import (
 	"encoding/json"
@@ -6,65 +6,83 @@ import (
 	"os/user"
 	"path/filepath"
 	"testing"
+
+	"github.com/abzcoding/hget/internal/util"
 )
 
-func TestStateSave(t *testing.T) {
-	// Setup test environment
-	originalDataFolder := dataFolder
-	dataFolder = ".hget_test/"
+func TestFolderOfPanic1(t *testing.T) {
 	defer func() {
-		dataFolder = originalDataFolder
+		if r := recover(); r == nil {
+			t.Errorf("The code did not panic")
+		}
+	}()
+	FolderOf("http://foo.bar/..")
+}
+
+func TestFolderOfPanic2(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Errorf("The code did not panic")
+		}
+	}()
+	FolderOf("http://foo.bar/../../../foobar")
+}
+
+func TestFolderOfNormal(t *testing.T) {
+	url := "http://foo.bar/file"
+	u := FolderOf(url)
+	if filepath.Base(u) != "file" {
+		t.Fatalf("FolderOf returned incorrect value")
+	}
+}
+
+func TestFolderWithoutParams(t *testing.T) {
+	url := "http://foo.bar/file?param=value"
+	u := FolderOf(url)
+	if filepath.Base(u) != "file" {
+		t.Fatalf("FolderOf returned incorrect value")
+	}
+}
+
+func TestStateSave(t *testing.T) {
+	originalDataFolder := DataFolder
+	DataFolder = ".hget_test/"
+	defer func() {
+		DataFolder = originalDataFolder
 		usr, _ := user.Current()
-		testFolder := filepath.Join(usr.HomeDir, dataFolder)
+		testFolder := filepath.Join(usr.HomeDir, DataFolder)
 		os.RemoveAll(testFolder)
 	}()
 
-	// Create test state
 	testURL := "http://example.com/test.zip"
 	s := &State{
 		URL: testURL,
 		Parts: []Part{
-			{
-				Index:     0,
-				URL:       testURL,
-				Path:      "temp_part0",
-				RangeFrom: 0,
-				RangeTo:   100,
-			},
-			{
-				Index:     1,
-				URL:       testURL,
-				Path:      "temp_part1",
-				RangeFrom: 101,
-				RangeTo:   200,
-			},
+			{Index: 0, URL: testURL, Path: "temp_part0", RangeFrom: 0, RangeTo: 100},
+			{Index: 1, URL: testURL, Path: "temp_part1", RangeFrom: 101, RangeTo: 200},
 		},
 	}
 
-	// Create temporary files for parts
 	for _, part := range s.Parts {
 		err := os.WriteFile(part.Path, []byte("test content"), 0644)
 		if err != nil {
 			t.Fatalf("Failed to create test file: %v", err)
 		}
-		defer os.Remove(part.Path) // Cleanup in case the test fails
+		defer os.Remove(part.Path)
 	}
 
-	// Test Save method
 	err := s.Save()
 	if err != nil {
 		t.Fatalf("Save() failed: %v", err)
 	}
 
-	// Verify state file was created
 	folder := FolderOf(testURL)
-	stateFilePath := filepath.Join(folder, stateFileName)
+	stateFilePath := filepath.Join(folder, StateFileName)
 
 	if _, err := os.Stat(stateFilePath); os.IsNotExist(err) {
 		t.Fatalf("State file was not created at %s", stateFilePath)
 	}
 
-	// Verify content of the state file
 	stateBytes, err := os.ReadFile(stateFilePath)
 	if err != nil {
 		t.Fatalf("Could not read state file: %v", err)
@@ -84,65 +102,46 @@ func TestStateSave(t *testing.T) {
 		t.Errorf("Expected %d parts, got %d", len(s.Parts), len(savedState.Parts))
 	}
 
-	// Verify part files were moved
 	for _, part := range s.Parts {
 		movedPath := filepath.Join(folder, filepath.Base(part.Path))
 		if _, err := os.Stat(movedPath); os.IsNotExist(err) {
 			t.Errorf("Part file not moved to %s", movedPath)
 		} else {
-			// Clean up moved files
 			os.Remove(movedPath)
 		}
 	}
 }
 
 func TestRead(t *testing.T) {
-	// Setup test environment
-	originalDataFolder := dataFolder
-	dataFolder = ".hget_test/"
+	originalDataFolder := DataFolder
+	DataFolder = ".hget_test/"
 	defer func() {
-		dataFolder = originalDataFolder
+		DataFolder = originalDataFolder
 		usr, _ := user.Current()
-		testFolder := filepath.Join(usr.HomeDir, dataFolder)
+		testFolder := filepath.Join(usr.HomeDir, DataFolder)
 		os.RemoveAll(testFolder)
 	}()
 
-	// Create test data
 	testURL := "http://example.com/test.zip"
 	testState := &State{
 		URL: testURL,
 		Parts: []Part{
-			{
-				Index:     0,
-				URL:       testURL,
-				Path:      "part0",
-				RangeFrom: 0,
-				RangeTo:   100,
-			},
-			{
-				Index:     1,
-				URL:       testURL,
-				Path:      "part1",
-				RangeFrom: 101,
-				RangeTo:   200,
-			},
+			{Index: 0, URL: testURL, Path: "part0", RangeFrom: 0, RangeTo: 100},
+			{Index: 1, URL: testURL, Path: "part1", RangeFrom: 101, RangeTo: 200},
 		},
 	}
 
-	// Set up directory structure
 	usr, _ := user.Current()
 	homeDir := usr.HomeDir
-	taskName := TaskFromURL(testURL)
-	folderPath := filepath.Join(homeDir, dataFolder, taskName)
-	stateFilePath := filepath.Join(folderPath, stateFileName)
+	taskName := util.TaskFromURL(testURL)
+	folderPath := filepath.Join(homeDir, DataFolder, taskName)
+	stateFilePath := filepath.Join(folderPath, StateFileName)
 
-	// Create directory
 	err := os.MkdirAll(folderPath, 0755)
 	if err != nil {
 		t.Fatalf("Failed to create test directory: %v", err)
 	}
 
-	// Write test state file
 	stateData, err := json.Marshal(testState)
 	if err != nil {
 		t.Fatalf("Failed to marshal test state: %v", err)
@@ -153,22 +152,20 @@ func TestRead(t *testing.T) {
 		t.Fatalf("Failed to write test state file: %v", err)
 	}
 
-	// Test Read function
-	state, err := Read(testURL)
+	st, err := Read(testURL)
 	if err != nil {
 		t.Fatalf("Read() failed: %v", err)
 	}
 
-	// Verify the read state matches the test state
-	if state.URL != testState.URL {
-		t.Errorf("Expected URL %s, got %s", testState.URL, state.URL)
+	if st.URL != testState.URL {
+		t.Errorf("Expected URL %s, got %s", testState.URL, st.URL)
 	}
 
-	if len(state.Parts) != len(testState.Parts) {
-		t.Errorf("Expected %d parts, got %d", len(testState.Parts), len(state.Parts))
+	if len(st.Parts) != len(testState.Parts) {
+		t.Errorf("Expected %d parts, got %d", len(testState.Parts), len(st.Parts))
 	}
 
-	for i, part := range state.Parts {
+	for i, part := range st.Parts {
 		if part.Index != testState.Parts[i].Index ||
 			part.URL != testState.Parts[i].URL ||
 			part.RangeFrom != testState.Parts[i].RangeFrom ||
@@ -179,7 +176,6 @@ func TestRead(t *testing.T) {
 }
 
 func TestReadNonExistent(t *testing.T) {
-	// Test reading a non-existent state file
 	_, err := Read("http://nonexistent.example.com/file.zip")
 	if err == nil {
 		t.Errorf("Expected error when reading non-existent state, got nil")

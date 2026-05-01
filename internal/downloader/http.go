@@ -1,4 +1,4 @@
-package main
+package downloader
 
 import (
 	"context"
@@ -20,6 +20,10 @@ import (
 	"github.com/fujiwara/shapeio"
 	"golang.org/x/net/proxy"
 	"golang.org/x/time/rate"
+
+	"github.com/abzcoding/hget/internal/state"
+	"github.com/abzcoding/hget/internal/ui"
+	"github.com/abzcoding/hget/internal/util"
 )
 
 var (
@@ -29,7 +33,7 @@ var (
 
 const defaultUserAgent = "curl/8.7.1"
 
-// HTTPDownloader holds the required configurations
+// HTTPDownloader holds the required configurations.
 type HTTPDownloader struct {
 	proxy         string
 	rate          int64
@@ -39,7 +43,7 @@ type HTTPDownloader struct {
 	len           int64
 	ips           []string
 	skipTLS       bool
-	parts         []Part
+	parts         []state.Part
 	resumable     bool
 	sharedLimiter *rate.Limiter
 	timeout       time.Duration
@@ -67,13 +71,13 @@ func NewHTTPDownloader(url string, par int, skipTLS bool, proxyServer string, bw
 	client := ProxyAwareHTTPClient(proxyServer, skipTLS, timeout)
 
 	parsed, err := stdurl.Parse(url)
-	FatalCheck(err)
+	util.FatalCheck(err)
 
 	ips, err := net.LookupIP(parsed.Hostname())
-	FatalCheck(err)
+	util.FatalCheck(err)
 
-	ipstr := FilterIPV4(ips)
-	Printf("Resolved IP: %s\n", strings.Join(ipstr, " | "))
+	ipstr := util.FilterIPV4(ips)
+	ui.Printf("Resolved IP: %s\n", strings.Join(ipstr, " | "))
 
 	// Probe capabilities with HEAD, fallback to range GET.
 	var rangeSupported bool
@@ -82,7 +86,7 @@ func NewHTTPDownloader(url string, par int, skipTLS bool, proxyServer string, bw
 
 	// HEAD probe
 	req, err := http.NewRequest("HEAD", url, nil)
-	FatalCheck(err)
+	util.FatalCheck(err)
 	req.Header.Set("Accept", "*/*")
 	req.Header.Set("User-Agent", defaultUserAgent)
 	req.Header.Set("Accept-Encoding", "identity")
@@ -135,36 +139,36 @@ func NewHTTPDownloader(url string, par int, skipTLS bool, proxyServer string, bw
 	}
 
 	if !rangeSupported {
-		Printf("Server does not support range requests, using 1 connection\n")
+		ui.Printf("Server does not support range requests, using 1 connection\n")
 		par = 1
 	}
 
 	if lenValue == 0 {
-		Printf("Content-Length unknown, using 1 connection\n")
+		ui.Printf("Content-Length unknown, using 1 connection\n")
 		lenValue = 1 // progress bar does not accept 0 length
 		par = 1
 		resumable = false
 	}
 
-	Printf("Connections: %d\n", par)
+	ui.Printf("Connections: %d\n", par)
 
 	sizeInMb := float64(lenValue) / (1024 * 1024)
 	if !lengthSpecified {
-		Printf("Size: unknown\n")
+		ui.Printf("Size: unknown\n")
 	} else if sizeInMb < 1024 {
-		Printf("Size: %.1f MB\n", sizeInMb)
+		ui.Printf("Size: %.1f MB\n", sizeInMb)
 	} else {
-		Printf("Size: %.1f GB\n", sizeInMb/1024)
+		ui.Printf("Size: %.1f GB\n", sizeInMb/1024)
 	}
 
-	file := TaskFromURL(url)
+	file := util.TaskFromURL(url)
 
 	ret := new(HTTPDownloader)
 	ret.rate = 0
 	bandwidthLimit, err := units.ParseStrictBytes(bwLimit)
 	if err == nil {
 		ret.rate = bandwidthLimit
-		Printf("Bandwidth limit: %s (%d B/s)\n", bwLimit, ret.rate)
+		ui.Printf("Bandwidth limit: %s (%d B/s)\n", bwLimit, ret.rate)
 	}
 	ret.url = url
 	ret.file = file
@@ -172,18 +176,18 @@ func NewHTTPDownloader(url string, par int, skipTLS bool, proxyServer string, bw
 	ret.len = lenValue
 	ret.ips = ipstr
 	ret.skipTLS = skipTLS
-	ret.parts = partCalculate(int64(par), lenValue, url)
+	ret.parts = PartCalculate(int64(par), lenValue, url)
 	ret.resumable = resumable
 	ret.proxy = proxyServer
 	ret.timeout = timeout
-	ret.client = client // reuse the already-created client
+	ret.client = client
 	if ret.rate > 0 {
 		ret.sharedLimiter = rate.NewLimiter(rate.Limit(ret.rate), int(ret.rate))
 	}
 
 	// Notify the TUI that download metadata is ready.
-	if Program != nil {
-		Program.Send(DownloadStartMsg{
+	if ui.Program != nil {
+		ui.Program.Send(ui.DownloadStartMsg{
 			URL:      url,
 			FileName: file,
 			Size:     lenValue,
@@ -207,10 +211,10 @@ type progressWriter struct {
 func (pw *progressWriter) Write(p []byte) (int, error) {
 	n, err := pw.writer.Write(p)
 	pw.downloaded += int64(n)
-	if Program != nil {
+	if ui.Program != nil {
 		now := time.Now()
 		if now.Sub(pw.lastSent) >= 80*time.Millisecond || pw.downloaded >= pw.total {
-			Program.Send(PartProgressMsg{
+			ui.Program.Send(ui.PartProgressMsg{
 				Index:      pw.partIndex,
 				Downloaded: pw.downloaded,
 				Total:      pw.total,
@@ -221,9 +225,9 @@ func (pw *progressWriter) Write(p []byte) (int, error) {
 	return n, err
 }
 
-// partCalculate splits the download into parts.
-func partCalculate(par int64, length int64, url string) []Part {
-	ret := make([]Part, par)
+// PartCalculate splits the download into parts.
+func PartCalculate(par int64, length int64, url string) []state.Part {
+	ret := make([]state.Part, par)
 	for j := int64(0); j < par; j++ {
 		from := (length / par) * j
 		var to int64
@@ -233,18 +237,18 @@ func partCalculate(par int64, length int64, url string) []Part {
 			to = length
 		}
 
-		file := TaskFromURL(url)
+		file := util.TaskFromURL(url)
 
-		folder := FolderOf(url)
-		if err := MkdirIfNotExist(folder); err != nil {
-			Errorf("%v", err)
+		folder := state.FolderOf(url)
+		if err := util.MkdirIfNotExist(folder); err != nil {
+			ui.Errorf("%v", err)
 			os.Exit(1)
 		}
 
 		// Zero-pad part index so filenames sort lexicographically in order.
 		fname := fmt.Sprintf("%s.part%06d", file, j)
 		path := filepath.Join(folder, fname)
-		ret[j] = Part{Index: j, URL: url, Path: path, RangeFrom: from, RangeTo: to}
+		ret[j] = state.Part{Index: j, URL: url, Path: path, RangeFrom: from, RangeTo: to}
 	}
 	return ret
 }
@@ -329,7 +333,7 @@ func ProxyAwareHTTPClient(proxyServer string, skipTLS bool, timeout time.Duratio
 }
 
 // Do is the main download entry point. It dispatches the download to multiple parts.
-func (d *HTTPDownloader) Do(doneChan chan bool, fileChan chan string, errorChan chan error, interruptChan chan bool, stateSaveChan chan Part) {
+func (d *HTTPDownloader) Do(doneChan chan bool, fileChan chan string, errorChan chan error, interruptChan chan bool, stateSaveChan chan state.Part) {
 	var wg sync.WaitGroup
 
 	for _, p := range d.parts {
@@ -347,8 +351,8 @@ func (d *HTTPDownloader) Do(doneChan chan bool, fileChan chan string, errorChan 
 }
 
 // handleCompletedPart notifies both drain channels that a part needs no downloading.
-func (d *HTTPDownloader) handleCompletedPart(p Part, fileChan chan string, stateSaveChan chan Part) {
-	stateSaveChan <- Part{
+func (d *HTTPDownloader) handleCompletedPart(p state.Part, fileChan chan string, stateSaveChan chan state.Part) {
+	stateSaveChan <- state.Part{
 		Index:     p.Index,
 		URL:       d.url,
 		Path:      p.Path,
@@ -356,14 +360,14 @@ func (d *HTTPDownloader) handleCompletedPart(p Part, fileChan chan string, state
 		RangeTo:   p.RangeTo,
 	}
 	fileChan <- p.Path
-	if Program != nil {
-		Program.Send(PartDoneMsg{Index: int(p.Index)})
+	if ui.Program != nil {
+		ui.Program.Send(ui.PartDoneMsg{Index: int(p.Index)})
 	}
 }
 
 // downloadPart handles the download process for an individual part.
-func (d *HTTPDownloader) downloadPart(part Part, wg *sync.WaitGroup,
-	fileChan chan string, errorChan chan error, interruptChan chan bool, stateSaveChan chan Part) {
+func (d *HTTPDownloader) downloadPart(part state.Part, wg *sync.WaitGroup,
+	fileChan chan string, errorChan chan error, interruptChan chan bool, stateSaveChan chan state.Part) {
 	defer wg.Done()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -389,7 +393,7 @@ func (d *HTTPDownloader) downloadPart(part Part, wg *sync.WaitGroup,
 	resp, err := d.client.Do(req)
 	if err != nil {
 		if errors.Is(err, context.Canceled) || ctx.Err() != nil {
-			stateSaveChan <- Part{
+			stateSaveChan <- state.Part{
 				Index:     part.Index,
 				URL:       d.url,
 				Path:      part.Path,
@@ -406,7 +410,7 @@ func (d *HTTPDownloader) downloadPart(part Part, wg *sync.WaitGroup,
 
 	f, err := os.OpenFile(part.Path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 	if err != nil {
-		Errorf("%v\n", err)
+		ui.Errorf("%v\n", err)
 		errorChan <- err
 		return
 	}
@@ -433,7 +437,7 @@ func (d *HTTPDownloader) downloadPart(part Part, wg *sync.WaitGroup,
 
 	// Save state: RangeFrom is updated to "next byte to download from".
 	// Resume() uses this value directly without adding fi.Size() again.
-	savedPart := Part{
+	savedPart := state.Part{
 		Index:     part.Index,
 		URL:       d.url,
 		Path:      part.Path,
@@ -444,14 +448,14 @@ func (d *HTTPDownloader) downloadPart(part Part, wg *sync.WaitGroup,
 	fileChan <- part.Path
 
 	if !interrupted {
-		if Program != nil {
-			Program.Send(PartDoneMsg{Index: int(part.Index)})
+		if ui.Program != nil {
+			ui.Program.Send(ui.PartDoneMsg{Index: int(part.Index)})
 		}
 	}
 }
 
 // buildRequestForPart prepares the HTTP GET request for a given part.
-func (d *HTTPDownloader) buildRequestForPart(ctx context.Context, part Part) (*http.Request, error) {
+func (d *HTTPDownloader) buildRequestForPart(ctx context.Context, part state.Part) (*http.Request, error) {
 	req, err := http.NewRequestWithContext(ctx, "GET", d.url, nil)
 	if err != nil {
 		return nil, err
@@ -491,15 +495,42 @@ func (d *HTTPDownloader) copyContent(src io.Reader, dst io.Writer, done chan boo
 	}
 }
 
+// NewHTTPDownloaderFromState rebuilds an HTTPDownloader from a saved State,
+// applying the given connection settings. Used when resuming a download.
+func NewHTTPDownloaderFromState(st *state.State, client *http.Client, proxyServer string, skipTLS bool, timeout time.Duration) *HTTPDownloader {
+	return &HTTPDownloader{
+		url:       st.URL,
+		file:      util.TaskFromURL(st.URL),
+		par:       int64(len(st.Parts)),
+		len:       0, // unknown at resume time; open-ended range used for last part
+		parts:     st.Parts,
+		resumable: true,
+		proxy:     proxyServer,
+		skipTLS:   skipTLS,
+		timeout:   timeout,
+		client:    client,
+	}
+}
+
+// NumParts returns the number of download parts.
+func (d *HTTPDownloader) NumParts() int {
+	return len(d.parts)
+}
+
+// IsResumable reports whether this download supports resumption.
+func (d *HTTPDownloader) IsResumable() bool {
+	return d.resumable
+}
+
 // DebugProbe performs HEAD and a 0-0 Range GET to print diagnostics without downloading.
 func DebugProbe(url string, skipTLS bool, proxyServer string, timeout time.Duration) {
 	client := ProxyAwareHTTPClient(proxyServer, skipTLS, timeout)
 
-	Printf("Probing URL: %s\n", url)
+	ui.Printf("Probing URL: %s\n", url)
 
 	headReq, err := http.NewRequest("HEAD", url, nil)
 	if err != nil {
-		Errorf("HEAD build error: %v\n", err)
+		ui.Errorf("HEAD build error: %v\n", err)
 		return
 	}
 	headReq.Header.Set("Accept-Encoding", "identity")
@@ -508,18 +539,18 @@ func DebugProbe(url string, skipTLS bool, proxyServer string, timeout time.Durat
 	var headResp *http.Response
 	headResp, err = client.Do(headReq)
 	if err != nil {
-		Errorf("HEAD request error: %v\n", err)
+		ui.Errorf("HEAD request error: %v\n", err)
 	} else {
 		defer headResp.Body.Close()
-		Printf("HEAD status: %s\n", headResp.Status)
-		Printf("HEAD Accept-Ranges: %s\n", headResp.Header.Get(acceptRangeHeader))
-		Printf("HEAD Content-Length: %s\n", headResp.Header.Get(contentLengthHeader))
-		Printf("HEAD Content-Type: %s\n", headResp.Header.Get("Content-Type"))
+		ui.Printf("HEAD status: %s\n", headResp.Status)
+		ui.Printf("HEAD Accept-Ranges: %s\n", headResp.Header.Get(acceptRangeHeader))
+		ui.Printf("HEAD Content-Length: %s\n", headResp.Header.Get(contentLengthHeader))
+		ui.Printf("HEAD Content-Type: %s\n", headResp.Header.Get("Content-Type"))
 	}
 
 	rangeReq, err := http.NewRequest("GET", url, nil)
 	if err != nil {
-		Errorf("Range build error: %v\n", err)
+		ui.Errorf("Range build error: %v\n", err)
 		return
 	}
 	rangeReq.Header.Set("Range", "bytes=0-0")
@@ -528,13 +559,13 @@ func DebugProbe(url string, skipTLS bool, proxyServer string, timeout time.Durat
 
 	rangeResp, err := client.Do(rangeReq)
 	if err != nil {
-		Errorf("Range request error: %v\n", err)
+		ui.Errorf("Range request error: %v\n", err)
 		return
 	}
 	defer rangeResp.Body.Close()
-	Printf("Range GET status: %s\n", rangeResp.Status)
-	Printf("Range Content-Range: %s\n", rangeResp.Header.Get("Content-Range"))
-	Printf("Range Content-Length: %s\n", rangeResp.Header.Get(contentLengthHeader))
+	ui.Printf("Range GET status: %s\n", rangeResp.Status)
+	ui.Printf("Range Content-Range: %s\n", rangeResp.Header.Get("Content-Range"))
+	ui.Printf("Range Content-Length: %s\n", rangeResp.Header.Get(contentLengthHeader))
 
 	var rangeSupported bool
 	if rangeResp.StatusCode == http.StatusPartialContent {
@@ -558,10 +589,10 @@ func DebugProbe(url string, skipTLS bool, proxyServer string, timeout time.Durat
 		}
 	}
 
-	Printf("Range support: %v\n", rangeSupported)
+	ui.Printf("Range support: %v\n", rangeSupported)
 	if totalLen > 0 {
-		Printf("Content-Length: %d bytes (%.1f MB)\n", totalLen, float64(totalLen)/(1024*1024))
+		ui.Printf("Content-Length: %d bytes (%.1f MB)\n", totalLen, float64(totalLen)/(1024*1024))
 	} else {
-		Printf("Content-Length: unknown\n")
+		ui.Printf("Content-Length: unknown\n")
 	}
 }

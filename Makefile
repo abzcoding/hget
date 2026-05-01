@@ -22,7 +22,7 @@ test:
 build: deps
 	@echo "====> Building $(BINARY) in ./$(BINDIR)"
 	mkdir -p $(BINDIR)
-	go build -ldflags "-X main.GitCommit=\"$(COMMIT)\"" -o $(BINDIR)/$(BINARY)
+	go build -ldflags "-X main.GitCommit=\"$(COMMIT)\"" -o $(BINDIR)/$(BINARY) ./cmd/hget/
 
 install: build
 	@echo "====> Installing $(BINARY) in $(INSTALL_PATH)/$(BINARY)"
