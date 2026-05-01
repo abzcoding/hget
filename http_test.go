@@ -102,24 +102,24 @@ func TestPartCalculate(t *testing.T) {
 
 func TestProxyAwareHTTPClient(t *testing.T) {
 	// Test with no proxy
-	client := ProxyAwareHTTPClient("", false)
+	client := ProxyAwareHTTPClient("", false, 15*time.Second)
 	if client == nil {
 		t.Fatal("ProxyAwareHTTPClient returned nil with no proxy")
 	}
 
 	// Cannot easily test with an actual proxy, but can verify it doesn't crash
-	httpProxyClient := ProxyAwareHTTPClient("http://localhost:8080", false)
+	httpProxyClient := ProxyAwareHTTPClient("http://localhost:8080", false, 15*time.Second)
 	if httpProxyClient == nil {
 		t.Fatal("ProxyAwareHTTPClient returned nil with HTTP proxy")
 	}
 
-	socksProxyClient := ProxyAwareHTTPClient("localhost:1080", false)
+	socksProxyClient := ProxyAwareHTTPClient("localhost:1080", false, 15*time.Second)
 	if socksProxyClient == nil {
 		t.Fatal("ProxyAwareHTTPClient returned nil with SOCKS proxy")
 	}
 
 	// Test TLS skipVerify parameter
-	tlsClient := ProxyAwareHTTPClient("", true)
+	tlsClient := ProxyAwareHTTPClient("", true, 15*time.Second)
 	if tlsClient == nil {
 		t.Fatal("ProxyAwareHTTPClient returned nil with TLS skip verification")
 	}
@@ -166,12 +166,14 @@ func TestHandleCompletedPart(t *testing.T) {
 	// Handle the completed part
 	downloader.handleCompletedPart(part, fileChan, stateSaveChan)
 
-	// We no longer send file paths via fileChan in handleCompletedPart
+	// handleCompletedPart sends to both fileChan and stateSaveChan.
 	select {
-	case <-fileChan:
-		t.Errorf("Did not expect path to be sent to fileChan")
+	case path := <-fileChan:
+		if path != part.Path {
+			t.Errorf("Expected path %q to be sent to fileChan, got %q", part.Path, path)
+		}
 	default:
-		// ok
+		t.Errorf("Expected path to be sent to fileChan")
 	}
 
 	// Verify the part was sent to stateSaveChan
@@ -356,7 +358,7 @@ func TestCopyContentWithSharedLimiter(t *testing.T) {
 
 func TestProxyAwareHTTPClientConfiguration(t *testing.T) {
 	// HTTP proxy config should set Transport.Proxy
-	client := ProxyAwareHTTPClient("http://127.0.0.1:3128", false)
+	client := ProxyAwareHTTPClient("http://127.0.0.1:3128", false, 15*time.Second)
 	tr, ok := client.Transport.(*http.Transport)
 	if !ok {
 		t.Fatalf("Transport is not *http.Transport")
@@ -366,7 +368,7 @@ func TestProxyAwareHTTPClientConfiguration(t *testing.T) {
 	}
 
 	// SOCKS5 proxy config should set DialContext
-	client = ProxyAwareHTTPClient("127.0.0.1:1080", false)
+	client = ProxyAwareHTTPClient("127.0.0.1:1080", false, 15*time.Second)
 	tr, ok = client.Transport.(*http.Transport)
 	if !ok || tr.DialContext == nil {
 		t.Errorf("expected SOCKS5 DialContext to be configured")
@@ -395,7 +397,7 @@ func TestNewHTTPDownloaderProbe(t *testing.T) {
 	ts := httptest.NewServer(h)
 	defer ts.Close()
 
-	d := NewHTTPDownloader(ts.URL, 4, false, "", "")
+	d := NewHTTPDownloader(ts.URL, 4, false, "", "", 15*time.Second)
 	if d.par != 4 {
 		t.Fatalf("expected par=4, got %d", d.par)
 	}
@@ -430,7 +432,7 @@ func TestNewHTTPDownloaderRangeFallback(t *testing.T) {
 	ts := httptest.NewServer(h)
 	defer ts.Close()
 
-	d := NewHTTPDownloader(ts.URL, 4, false, "", "")
+	d := NewHTTPDownloader(ts.URL, 4, false, "", "", 15*time.Second)
 	if d.par != 4 {
 		t.Fatalf("expected par=4, got %d", d.par)
 	}

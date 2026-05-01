@@ -129,7 +129,7 @@ func TestE2EParallelDownloadWithRange(t *testing.T) {
 	ts, _ := startTestServer(t, content, true, true, true, true, path)
 
 	url := ts.URL + path
-	Execute(url, nil, 4, false, "", "")
+	Execute(url, nil, 4, false, "", "", 15*time.Second)
 
 	// Verify output file exists and content matches
 	out := TaskFromURL(url)
@@ -183,6 +183,9 @@ func TestE2EResumeDownload(t *testing.T) {
 		if err := os.WriteFile(parts[i].Path, slice, 0600); err != nil {
 			t.Fatalf("failed to write partial part: %v", err)
 		}
+		// The interrupt handler saves RangeFrom = original + bytes_downloaded.
+		// Update RangeFrom here so the saved state matches what a real interrupt produces.
+		parts[i].RangeFrom = start + writeSize
 	}
 
 	state := &State{URL: url, Parts: parts}
@@ -196,7 +199,7 @@ func TestE2EResumeDownload(t *testing.T) {
 		t.Fatalf("Resume failed: %v", err)
 	}
 
-	Execute(url, resumed, 4, false, "", "")
+	Execute(url, resumed, 4, false, "", "", 15*time.Second)
 
 	out := TaskFromURL(url)
 	got, err := os.ReadFile(out)
@@ -220,7 +223,7 @@ func TestE2ERangeSupportedWithoutAcceptRanges(t *testing.T) {
 	ts, rangeCount := startTestServer(t, content, true, false, true, true, path)
 	url := ts.URL + path
 
-	Execute(url, nil, 3, false, "", "")
+	Execute(url, nil, 3, false, "", "", 15*time.Second)
 
 	// Confirm at least one ranged request happened
 	if atomic.LoadInt32(rangeCount) == 0 {
@@ -247,7 +250,7 @@ func TestE2EUnknownLengthSinglePart(t *testing.T) {
 	ts, _ := startTestServer(t, content, false, false, false, false, path)
 	url := ts.URL + path
 
-	Execute(url, nil, 4, false, "", "")
+	Execute(url, nil, 4, false, "", "", 15*time.Second)
 
 	out := TaskFromURL(url)
 	got, err := os.ReadFile(out)
@@ -269,7 +272,7 @@ func TestE2EGlobalRateLimit(t *testing.T) {
 	url := ts.URL + path
 
 	start := time.Now()
-	Execute(url, nil, 4, false, "", "100KB")
+	Execute(url, nil, 4, false, "", "100KB", 15*time.Second)
 	dur := time.Since(start)
 
 	// With global 100KB/s limit and a 100KB burst, 200KB typically completes ~1.0–1.1s.
@@ -306,7 +309,7 @@ func TestE2EInterruptCancelsAndSavesState(t *testing.T) {
 	}()
 
 	start := time.Now()
-	Execute(url, nil, 4, false, "", "50KB")
+	Execute(url, nil, 4, false, "", "50KB", 15*time.Second)
 	<-doneSig
 	dur := time.Since(start)
 

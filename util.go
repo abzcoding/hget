@@ -8,8 +8,6 @@ import (
 	"os/user"
 	"path/filepath"
 	"strings"
-
-	"github.com/mattn/go-isatty"
 )
 
 // FatalCheck panics if err is not nil.
@@ -45,11 +43,6 @@ func MkdirIfNotExist(folder string) error {
 func ExistDir(folder string) bool {
 	_, err := os.Stat(folder)
 	return err == nil
-}
-
-// DisplayProgressBar shows a fancy progress bar
-func DisplayProgressBar() bool {
-	return isatty.IsTerminal(os.Stdout.Fd()) && displayProgress
 }
 
 // FolderOf makes sure you won't get LFI

@@ -3,14 +3,18 @@ package main
 import (
 	"bufio"
 	"flag"
+	"fmt"
 	"io"
 	"os"
 	"os/signal"
 	"runtime"
 	"strings"
 	"syscall"
+	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/imkira/go-task"
+	"github.com/mattn/go-isatty"
 )
 
 var displayProgress = true
@@ -26,21 +30,48 @@ func main() {
 	flag.StringVar(&bwLimit, "rate", "", "bandwidth limit during download, e.g. -rate 10kB or -rate 10MiB")
 	flag.StringVar(&resumeTask, "resume", "", "resume download task with given task name (or URL)")
 	probe := flag.String("probe", "", "probe URL for range and content-length without downloading")
+	timeout := flag.Duration("timeout", 15*time.Second, "timeout for awaiting response headers (e.g., 30s, 1m)")
 
 	flag.Parse()
 	args := flag.Args()
 
 	// Probe diagnostics mode
 	if *probe != "" {
-		DebugProbe(*probe, *skiptls, proxy)
+		DebugProbe(*probe, *skiptls, proxy, *timeout)
 		return
 	}
 
 	// If the resume flag is provided, use that path (ignoring other arguments)
 	if resumeTask != "" {
 		state, err := Resume(resumeTask)
-		FatalCheck(err)
-		Execute(state.URL, state, *conn, *skiptls, proxy, bwLimit)
+		if err != nil {
+			if !os.IsNotExist(err) {
+				Errorf("Resume failed: %v\n", err)
+				os.Exit(1)
+			}
+			// No state.json — try to reconstruct from existing part files.
+			state, err = ReconstructStateFromParts(resumeTask, *skiptls, proxy, *timeout)
+			if err == nil {
+				Printf("Reconstructed state from %d part files — resuming.\n", len(state.Parts))
+				runWithTUI(func() {
+					Execute(state.URL, state, *conn, *skiptls, proxy, bwLimit, *timeout)
+				}, *conn)
+				return
+			}
+			// No part files either — start fresh if it looks like a URL.
+			Warnf("No saved state found for %q — starting fresh download.\n", resumeTask)
+			if !IsURL(resumeTask) {
+				Errorf("No saved state found for task %q and it is not a URL.\n", resumeTask)
+				os.Exit(1)
+			}
+			runWithTUI(func() {
+				Execute(resumeTask, nil, *conn, *skiptls, proxy, bwLimit, *timeout)
+			}, *conn)
+			return
+		}
+		runWithTUI(func() {
+			Execute(state.URL, state, *conn, *skiptls, proxy, bwLimit, *timeout)
+		}, *conn)
 		return
 	}
 
@@ -70,7 +101,7 @@ func main() {
 				continue
 			}
 			// Add the download task for each URL
-			g1.AddChild(downloadTask(url, nil, *conn, *skiptls, proxy, bwLimit))
+			g1.AddChild(downloadTask(url, nil, *conn, *skiptls, proxy, bwLimit, *timeout))
 		}
 		g1.Run(nil)
 		return
@@ -80,22 +111,59 @@ func main() {
 	downloadURL := args[0]
 	// Check if a folder already exists for the task and remove if necessary.
 	if ExistDir(FolderOf(downloadURL)) {
-		Warnf("Downloading task already exists, remove it first \n")
+		Warnf("Downloading task already exists, remove it first\n")
 		err := os.RemoveAll(FolderOf(downloadURL))
 		FatalCheck(err)
 	}
-	Execute(downloadURL, nil, *conn, *skiptls, proxy, bwLimit)
+	runWithTUI(func() {
+		Execute(downloadURL, nil, *conn, *skiptls, proxy, bwLimit, *timeout)
+	}, *conn)
 }
 
-func downloadTask(url string, state *State, conn int, skiptls bool, proxy string, bwLimit string) task.Task {
+// runWithTUI starts a Bubble Tea program for interactive TTY sessions and runs fn
+// in a background goroutine. Falls back to plain execution when not in a TTY.
+func runWithTUI(fn func(), numConns int) {
+	if isatty.IsTerminal(os.Stdout.Fd()) && displayProgress {
+		model := newTUIModel(numConns)
+		p := tea.NewProgram(model, tea.WithAltScreen())
+		Program = p
+		go func() {
+			var downloadErr error
+			defer func() {
+				if r := recover(); r != nil {
+					if err, ok := r.(error); ok {
+						downloadErr = err
+					} else {
+						downloadErr = fmt.Errorf("%v", r)
+					}
+				}
+				if downloadErr != nil {
+					p.Send(DownloadErrorMsg{Err: downloadErr})
+				} else {
+					p.Send(DownloadDoneMsg{})
+				}
+			}()
+			fn()
+		}()
+		if _, err := p.Run(); err != nil {
+			fmt.Fprintln(os.Stderr, "TUI error:", err)
+			os.Exit(1)
+		}
+		return
+	}
+	// Non-TTY: run directly.
+	fn()
+}
+
+func downloadTask(url string, state *State, conn int, skiptls bool, proxy string, bwLimit string, timeout time.Duration) task.Task {
 	run := func(t task.Task, ctx task.Context) {
-		Execute(url, state, conn, skiptls, proxy, bwLimit)
+		Execute(url, state, conn, skiptls, proxy, bwLimit, timeout)
 	}
 	return task.NewTaskWithFunc(run)
 }
 
 // Execute configures the HTTPDownloader and uses it to download the target.
-func Execute(url string, state *State, conn int, skiptls bool, proxy string, bwLimit string) {
+func Execute(url string, state *State, conn int, skiptls bool, proxy string, bwLimit string, timeout time.Duration) {
 	// Capture OS interrupt signals
 	signalChan := make(chan os.Signal, 1)
 	signal.Notify(signalChan,
@@ -103,95 +171,118 @@ func Execute(url string, state *State, conn int, skiptls bool, proxy string, bwL
 		syscall.SIGINT,
 		syscall.SIGTERM,
 		syscall.SIGQUIT)
+	defer signal.Stop(signalChan)
 
-	var files = make([]string, 0)
-	var parts = make([]Part, 0)
 	var isInterrupted = false
-
-	doneChan := make(chan bool, conn)
-	fileChan := make(chan string, conn)
-	errorChan := make(chan error, 1)
-	stateChan := make(chan Part, 1)
-	interruptChan := make(chan bool, conn)
 
 	var downloader *HTTPDownloader
 	if state == nil {
-		downloader = NewHTTPDownloader(url, conn, skiptls, proxy, bwLimit)
+		downloader = NewHTTPDownloader(url, conn, skiptls, proxy, bwLimit, timeout)
 	} else {
+		// Rebuild client with current connection settings so proxy/TLS/timeout are honoured.
+		client := ProxyAwareHTTPClient(proxy, skiptls, timeout)
 		downloader = &HTTPDownloader{
 			url:       state.URL,
 			file:      TaskFromURL(state.URL),
 			par:       int64(len(state.Parts)),
+			len:       0, // unknown at resume time; open-ended range used for last part
 			parts:     state.Parts,
 			resumable: true,
+			proxy:     proxy,
+			skipTLS:   skiptls,
+			timeout:   timeout,
+			client:    client,
+		}
+		if Program != nil {
+			Program.Send(DownloadStartMsg{
+				URL:      state.URL,
+				FileName: TaskFromURL(state.URL),
+				NumParts: len(state.Parts),
+			})
 		}
 	}
+
+	numParts := len(downloader.parts)
+
+	doneChan := make(chan bool, 1)
+	fileChan := make(chan string, numParts)
+	errorChan := make(chan error, numParts)
+	stateChan := make(chan Part, numParts)
+	interruptChan := make(chan bool, numParts)
+
 	go downloader.Do(doneChan, fileChan, errorChan, interruptChan, stateChan)
 
+	var parts []Part
+	var files []string
+
+loop:
 	for {
 		select {
 		case <-signalChan:
-			// Signal all active download routines to interrupt.
-			isInterrupted = true
-			for i := 0; i < conn; i++ {
-				interruptChan <- true
+			if !isInterrupted {
+				isInterrupted = true
+				for i := 0; i < numParts; i++ {
+					interruptChan <- true
+				}
 			}
 		case file := <-fileChan:
 			files = append(files, file)
 		case err := <-errorChan:
-			Errorf("%v", err)
-			panic(err)
+			Errorf("%v\n", err)
+			if Program != nil {
+				Program.Send(DownloadErrorMsg{Err: err})
+			} else {
+				os.Exit(1)
+			}
+			return
 		case part := <-stateChan:
 			parts = append(parts, part)
 		case <-doneChan:
-			// Ensure we drain remaining part notifications before finalizing.
-			numParts := len(downloader.parts)
+			// Drain remaining in-flight notifications.
 			for len(files) < numParts {
-				file := <-fileChan
-				files = append(files, file)
+				files = append(files, <-fileChan)
 			}
 			for len(parts) < numParts {
-				part := <-stateChan
-				parts = append(parts, part)
+				parts = append(parts, <-stateChan)
 			}
-			// Build file list from final part states to avoid missing/duplicate paths
-			files = make([]string, 0, len(parts))
-			for _, p := range parts {
-				files = append(files, p.Path)
-			}
-			if isInterrupted {
-				if downloader.resumable {
-					Printf("Interrupted, saving state...\n")
-					s := &State{URL: url, Parts: parts}
-					if err := s.Save(); err != nil {
-						Errorf("%v\n", err)
-					}
-				} else {
-					Warnf("Interrupted, but the download is not resumable. Exiting silently.\n")
-				}
-			} else {
-				// Rebuild files from folder to avoid any missing/duplicate paths from channels
-				folder := FolderOf(url)
-				entries, readErr := os.ReadDir(folder)
-				FatalCheck(readErr)
-				files = files[:0]
-				prefix := TaskFromURL(url) + ".part"
-				for _, e := range entries {
-					if e.IsDir() {
-						continue
-					}
-					name := e.Name()
-					if strings.HasPrefix(name, prefix) {
-						files = append(files, folder+string(os.PathSeparator)+name)
-					}
-				}
-				err := JoinFile(files, TaskFromURL(url))
-				FatalCheck(err)
-				err = os.RemoveAll(FolderOf(url))
-				FatalCheck(err)
-			}
-			return
+			break loop
 		}
+	}
+
+	if isInterrupted {
+		if downloader.resumable {
+			Printf("Interrupted — saving state…\n")
+			s := &State{URL: url, Parts: parts}
+			if err := s.Save(); err != nil {
+				Errorf("Save failed: %v\n", err)
+			}
+		} else {
+			Warnf("Interrupted, download is not resumable.\n")
+		}
+		return
+	}
+
+	// Collect part files from the temp folder (source of truth, avoids channel races).
+	folder := FolderOf(url)
+	entries, readErr := os.ReadDir(folder)
+	FatalCheck(readErr)
+	files = files[:0]
+	prefix := TaskFromURL(url) + ".part"
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasPrefix(e.Name(), prefix) {
+			files = append(files, folder+string(os.PathSeparator)+e.Name())
+		}
+	}
+
+	if err := JoinFile(files, TaskFromURL(url)); err != nil {
+		Errorf("Join failed: %v\n", err)
+		if Program != nil {
+			Program.Send(DownloadErrorMsg{Err: err})
+		}
+		return
+	}
+	if err := os.RemoveAll(FolderOf(url)); err != nil {
+		Warnf("Cleanup failed: %v\n", err)
 	}
 }
 
@@ -208,5 +299,6 @@ func usage() {
    -rate string    bandwidth limit during download (e.g., 10kB, 10MiB)
    -resume string  resume a stopped download by providing its task name or URL
    -probe string   probe URL for range and content-length without downloading
+   -timeout duration timeout for awaiting response headers (default 15s)
  `)
 }

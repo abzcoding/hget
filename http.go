@@ -17,11 +17,9 @@ import (
 	"time"
 
 	"github.com/alecthomas/units"
-	"github.com/fatih/color"
 	"github.com/fujiwara/shapeio"
 	"golang.org/x/net/proxy"
 	"golang.org/x/time/rate"
-	pb "gopkg.in/cheggaaa/pb.v1"
 )
 
 var (
@@ -30,9 +28,6 @@ var (
 )
 
 const defaultUserAgent = "curl/8.7.1"
-
-// Default response header timeout; can be overridden by CLI flag in main.go
-var responseHeaderTimeout = 15 * time.Second
 
 // HTTPDownloader holds the required configurations
 type HTTPDownloader struct {
@@ -47,6 +42,9 @@ type HTTPDownloader struct {
 	parts         []Part
 	resumable     bool
 	sharedLimiter *rate.Limiter
+	timeout       time.Duration
+	// client is reused across all part goroutines for connection pooling.
+	client *http.Client
 }
 
 // rateLimitedReader wraps a reader and throttles reads using a shared limiter.
@@ -63,10 +61,10 @@ func (rlr *rateLimitedReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// NewHTTPDownloader returns a ProxyAwareHttpClient with given configurations.
-func NewHTTPDownloader(url string, par int, skipTLS bool, proxyServer string, bwLimit string) *HTTPDownloader {
+// NewHTTPDownloader returns a configured HTTPDownloader ready to download url.
+func NewHTTPDownloader(url string, par int, skipTLS bool, proxyServer string, bwLimit string, timeout time.Duration) *HTTPDownloader {
 	var resumable = true
-	client := ProxyAwareHTTPClient(proxyServer, skipTLS)
+	client := ProxyAwareHTTPClient(proxyServer, skipTLS, timeout)
 
 	parsed, err := stdurl.Parse(url)
 	FatalCheck(err)
@@ -75,27 +73,27 @@ func NewHTTPDownloader(url string, par int, skipTLS bool, proxyServer string, bw
 	FatalCheck(err)
 
 	ipstr := FilterIPV4(ips)
-	Printf("Resolve ip: %s\n", strings.Join(ipstr, " | "))
+	Printf("Resolved IP: %s\n", strings.Join(ipstr, " | "))
 
-	// Probe capabilities with HEAD, fallback to range GET
+	// Probe capabilities with HEAD, fallback to range GET.
 	var rangeSupported bool
 	var lenValue int64
 	lengthSpecified := false
 
 	// HEAD probe
 	req, err := http.NewRequest("HEAD", url, nil)
-	if err != nil {
-		FatalCheck(err)
-	}
+	FatalCheck(err)
 	req.Header.Set("Accept", "*/*")
 	req.Header.Set("User-Agent", defaultUserAgent)
-	resp, err := client.Do(req)
+	req.Header.Set("Accept-Encoding", "identity")
+	var headResp *http.Response
+	headResp, err = client.Do(req)
 	if err == nil {
-		defer resp.Body.Close()
-		if strings.Contains(strings.ToLower(resp.Header.Get(acceptRangeHeader)), "bytes") {
+		defer headResp.Body.Close()
+		if strings.Contains(strings.ToLower(headResp.Header.Get(acceptRangeHeader)), "bytes") {
 			rangeSupported = true
 		}
-		if cl := resp.Header.Get(contentLengthHeader); cl != "" {
+		if cl := headResp.Header.Get(contentLengthHeader); cl != "" {
 			if v, perr := strconv.ParseInt(cl, 10, 64); perr == nil && v > 0 {
 				lenValue = v
 				lengthSpecified = true
@@ -103,19 +101,19 @@ func NewHTTPDownloader(url string, par int, skipTLS bool, proxyServer string, bw
 		}
 	}
 
-	// Range GET probe (0-0) to robustly detect range support and total size via Content-Range
+	// Range GET probe (0-0) to robustly detect range support and total size via Content-Range.
 	if !rangeSupported || lenValue == 0 {
 		preq, perr := http.NewRequest("GET", url, nil)
 		if perr == nil {
 			preq.Header.Set("Range", "bytes=0-0")
 			preq.Header.Set("Accept", "*/*")
 			preq.Header.Set("User-Agent", defaultUserAgent)
+			preq.Header.Set("Accept-Encoding", "identity")
 			pr, derr := client.Do(preq)
 			if derr == nil {
 				defer pr.Body.Close()
 				if pr.StatusCode == http.StatusPartialContent {
 					rangeSupported = true
-					// Parse Content-Range: bytes 0-0/12345
 					cr := pr.Header.Get("Content-Range")
 					if slash := strings.LastIndex(cr, "/"); slash != -1 && slash+1 < len(cr) {
 						if total, aerr := strconv.ParseInt(cr[slash+1:], 10, 64); aerr == nil && total > 0 {
@@ -124,7 +122,6 @@ func NewHTTPDownloader(url string, par int, skipTLS bool, proxyServer string, bw
 						}
 					}
 				} else {
-					// Treat as non-ranged; attempt to read Content-Length if present
 					rangeSupported = false
 					if cl := pr.Header.Get(contentLengthHeader); cl != "" {
 						if v, perr := strconv.ParseInt(cl, 10, 64); perr == nil && v > 0 {
@@ -138,26 +135,26 @@ func NewHTTPDownloader(url string, par int, skipTLS bool, proxyServer string, bw
 	}
 
 	if !rangeSupported {
-		Printf("Target url does not confirm range support, fallback to parallel 1\n")
+		Printf("Server does not support range requests, using 1 connection\n")
 		par = 1
 	}
 
 	if lenValue == 0 {
-		Printf("Target url did not provide content length, fallback to parallel 1\n")
+		Printf("Content-Length unknown, using 1 connection\n")
 		lenValue = 1 // progress bar does not accept 0 length
 		par = 1
 		resumable = false
 	}
 
-	Printf("Start download with %d connections \n", par)
+	Printf("Connections: %d\n", par)
 
 	sizeInMb := float64(lenValue) / (1024 * 1024)
 	if !lengthSpecified {
-		Printf("Download size: not specified\n")
+		Printf("Size: unknown\n")
 	} else if sizeInMb < 1024 {
-		Printf("Download target size: %.1f MB\n", sizeInMb)
+		Printf("Size: %.1f MB\n", sizeInMb)
 	} else {
-		Printf("Download target size: %.1f GB\n", sizeInMb/1024)
+		Printf("Size: %.1f GB\n", sizeInMb/1024)
 	}
 
 	file := TaskFromURL(url)
@@ -166,8 +163,8 @@ func NewHTTPDownloader(url string, par int, skipTLS bool, proxyServer string, bw
 	ret.rate = 0
 	bandwidthLimit, err := units.ParseStrictBytes(bwLimit)
 	if err == nil {
-		ret.rate = bandwidthLimit // bytes per second
-		Printf("Download with bandwidth limit set to %s[%d]\n", bwLimit, ret.rate)
+		ret.rate = bandwidthLimit
+		Printf("Bandwidth limit: %s (%d B/s)\n", bwLimit, ret.rate)
 	}
 	ret.url = url
 	ret.file = file
@@ -178,23 +175,62 @@ func NewHTTPDownloader(url string, par int, skipTLS bool, proxyServer string, bw
 	ret.parts = partCalculate(int64(par), lenValue, url)
 	ret.resumable = resumable
 	ret.proxy = proxyServer
+	ret.timeout = timeout
+	ret.client = client // reuse the already-created client
 	if ret.rate > 0 {
 		ret.sharedLimiter = rate.NewLimiter(rate.Limit(ret.rate), int(ret.rate))
+	}
+
+	// Notify the TUI that download metadata is ready.
+	if Program != nil {
+		Program.Send(DownloadStartMsg{
+			URL:      url,
+			FileName: file,
+			Size:     lenValue,
+			NumParts: par,
+			IPs:      ipstr,
+		})
 	}
 
 	return ret
 }
 
+// progressWriter tracks bytes written and forwards progress updates to the TUI.
+type progressWriter struct {
+	partIndex  int
+	downloaded int64
+	total      int64
+	writer     io.Writer
+	lastSent   time.Time
+}
+
+func (pw *progressWriter) Write(p []byte) (int, error) {
+	n, err := pw.writer.Write(p)
+	pw.downloaded += int64(n)
+	if Program != nil {
+		now := time.Now()
+		if now.Sub(pw.lastSent) >= 80*time.Millisecond || pw.downloaded >= pw.total {
+			Program.Send(PartProgressMsg{
+				Index:      pw.partIndex,
+				Downloaded: pw.downloaded,
+				Total:      pw.total,
+			})
+			pw.lastSent = now
+		}
+	}
+	return n, err
+}
+
 // partCalculate splits the download into parts.
-func partCalculate(par int64, len int64, url string) []Part {
+func partCalculate(par int64, length int64, url string) []Part {
 	ret := make([]Part, par)
 	for j := int64(0); j < par; j++ {
-		from := (len / par) * j
+		from := (length / par) * j
 		var to int64
 		if j < par-1 {
-			to = (len/par)*(j+1) - 1
+			to = (length/par)*(j+1) - 1
 		} else {
-			to = len
+			to = length
 		}
 
 		file := TaskFromURL(url)
@@ -205,28 +241,28 @@ func partCalculate(par int64, len int64, url string) []Part {
 			os.Exit(1)
 		}
 
-		// Padding 0 before path name as filename will be sorted as strings
+		// Zero-pad part index so filenames sort lexicographically in order.
 		fname := fmt.Sprintf("%s.part%06d", file, j)
-		path := filepath.Join(folder, fname) // e.g. ~/.hget/download-file-name/part-name
+		path := filepath.Join(folder, fname)
 		ret[j] = Part{Index: j, URL: url, Path: path, RangeFrom: from, RangeTo: to}
 	}
 	return ret
 }
 
 // ProxyAwareHTTPClient returns an HTTP client that may use an HTTP or SOCKS5 proxy.
-func ProxyAwareHTTPClient(proxyServer string, skipTLS bool) *http.Client {
+func ProxyAwareHTTPClient(proxyServer string, skipTLS bool, timeout time.Duration) *http.Client {
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
 	dialer := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
 
-	// Mimic curl/OpenSSL defaults for TLS1.2 suites and curve preferences.
 	tlsConf := &tls.Config{
-		InsecureSkipVerify:       skipTLS, // #nosec G402
-		MinVersion:               tls.VersionTLS12,
-		PreferServerCipherSuites: true, // server-side only, harmless on client
+		InsecureSkipVerify: skipTLS, // #nosec G402
+		MinVersion:         tls.VersionTLS12,
 		CurvePreferences: []tls.CurveID{
 			tls.X25519, tls.CurveP256, tls.CurveP384, tls.CurveP521,
 		},
 		CipherSuites: []uint16{
-			// TLS 1.2 order similar to curl/openssl
 			tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
 			tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
 			tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
@@ -242,25 +278,24 @@ func ProxyAwareHTTPClient(proxyServer string, skipTLS bool) *http.Client {
 	}
 
 	httpTransport := &http.Transport{
-		TLSClientConfig:       tlsConf,
-		DialContext:           dialer.DialContext,
+		TLSClientConfig: tlsConf,
+		DialContext:     dialer.DialContext,
+		// Disable transparent decompression so range byte offsets are never
+		// reinterpreted against a compressed stream.
+		DisableCompression:    true,
 		TLSHandshakeTimeout:   20 * time.Second,
-		ResponseHeaderTimeout: responseHeaderTimeout,
+		ResponseHeaderTimeout: timeout,
 		ExpectContinueTimeout: 2 * time.Second,
 		IdleConnTimeout:       90 * time.Second,
 		MaxIdleConns:          100,
-		MaxIdleConnsPerHost:   10,
-		DisableCompression:    false,
+		MaxIdleConnsPerHost:   32,
 		ForceAttemptHTTP2:     true,
-		// let default TLSNextProto enable HTTP/2
 	}
 
 	httpClient := &http.Client{Transport: httpTransport}
 
-	// Preserve headers across redirects
 	httpClient.CheckRedirect = func(req *http.Request, via []*http.Request) error {
 		if len(via) > 0 {
-			// Copy headers from the initial request if missing
 			for k, v := range via[0].Header {
 				if req.Header.Get(k) == "" {
 					req.Header[k] = v
@@ -296,45 +331,23 @@ func ProxyAwareHTTPClient(proxyServer string, skipTLS bool) *http.Client {
 // Do is the main download entry point. It dispatches the download to multiple parts.
 func (d *HTTPDownloader) Do(doneChan chan bool, fileChan chan string, errorChan chan error, interruptChan chan bool, stateSaveChan chan Part) {
 	var wg sync.WaitGroup
-	var bars []*pb.ProgressBar
 
-	// Start each part via helper functions.
 	for _, p := range d.parts {
-		// If the part is already completed or has no data to download.
 		if p.RangeTo <= p.RangeFrom {
+			// Part is fully downloaded; satisfy both channels the drain loop expects.
 			d.handleCompletedPart(p, fileChan, stateSaveChan)
 			continue
 		}
-
-		var bar *pb.ProgressBar
-		if DisplayProgressBar() {
-			bar = pb.New64(p.RangeTo - p.RangeFrom).
-				SetUnits(pb.U_BYTES).
-				Prefix(color.YellowString(fmt.Sprintf("%s-%d", d.file, p.Index)))
-			bars = append(bars, bar)
-		}
-
 		wg.Add(1)
-		go d.downloadPart(p, bar, &wg, fileChan, errorChan, interruptChan, stateSaveChan)
+		go d.downloadPart(p, &wg, fileChan, errorChan, interruptChan, stateSaveChan)
 	}
 
-	// Start the progress bar pool if needed.
-	if DisplayProgressBar() && len(bars) > 0 {
-		pool, err := pb.StartPool(bars...)
-		FatalCheck(err)
-		wg.Wait()
-		doneChan <- true
-		pool.Stop()
-	} else {
-		wg.Wait()
-		doneChan <- true
-	}
+	wg.Wait()
+	doneChan <- true
 }
 
-// handleCompletedPart simply notifies that a part doesn't need downloading.
+// handleCompletedPart notifies both drain channels that a part needs no downloading.
 func (d *HTTPDownloader) handleCompletedPart(p Part, fileChan chan string, stateSaveChan chan Part) {
-	// Avoid sending path here; we'll assemble paths from final states in main
-	// Send a part indicating no additional data
 	stateSaveChan <- Part{
 		Index:     p.Index,
 		URL:       d.url,
@@ -342,35 +355,40 @@ func (d *HTTPDownloader) handleCompletedPart(p Part, fileChan chan string, state
 		RangeFrom: p.RangeFrom,
 		RangeTo:   p.RangeTo,
 	}
+	fileChan <- p.Path
+	if Program != nil {
+		Program.Send(PartDoneMsg{Index: int(p.Index)})
+	}
 }
 
 // downloadPart handles the download process for an individual part.
-func (d *HTTPDownloader) downloadPart(part Part, bar *pb.ProgressBar, wg *sync.WaitGroup,
+func (d *HTTPDownloader) downloadPart(part Part, wg *sync.WaitGroup,
 	fileChan chan string, errorChan chan error, interruptChan chan bool, stateSaveChan chan Part) {
 	defer wg.Done()
 
-	// Context for cancellation via interrupt
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	// Cancel context when an interrupt arrives; also exit the goroutine when
+	// the context is cancelled by other means (e.g. normal completion via defer).
 	go func() {
-		// cancel on interrupt
-		<-interruptChan
-		cancel()
+		select {
+		case <-interruptChan:
+			cancel()
+		case <-ctx.Done():
+		}
 	}()
 
-	// Build and issue the HTTP request.
 	req, err := d.buildRequestForPart(ctx, part)
 	if err != nil {
 		errorChan <- err
 		return
 	}
 
-	client := ProxyAwareHTTPClient(d.proxy, d.skipTLS)
-	resp, err := client.Do(req)
+	// Reuse the shared client for connection pooling.
+	resp, err := d.client.Do(req)
 	if err != nil {
-		// treat context cancellation as interrupt, not error
-		if errors.Is(err, context.Canceled) || (ctx.Err() != nil) {
-			// Save current state (no progress yet)
+		if errors.Is(err, context.Canceled) || ctx.Err() != nil {
 			stateSaveChan <- Part{
 				Index:     part.Index,
 				URL:       d.url,
@@ -378,6 +396,7 @@ func (d *HTTPDownloader) downloadPart(part Part, bar *pb.ProgressBar, wg *sync.W
 				RangeFrom: part.RangeFrom,
 				RangeTo:   part.RangeTo,
 			}
+			fileChan <- part.Path
 			return
 		}
 		errorChan <- err
@@ -385,7 +404,6 @@ func (d *HTTPDownloader) downloadPart(part Part, bar *pb.ProgressBar, wg *sync.W
 	}
 	defer resp.Body.Close()
 
-	// Open the file for appending data.
 	f, err := os.OpenFile(part.Path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 	if err != nil {
 		Errorf("%v\n", err)
@@ -394,75 +412,72 @@ func (d *HTTPDownloader) downloadPart(part Part, bar *pb.ProgressBar, wg *sync.W
 	}
 	defer f.Close()
 
-	// Combine file writer and progress bar writer if needed.
-	var writer io.Writer
-	if DisplayProgressBar() && bar != nil {
-		writer = io.MultiWriter(f, bar)
-	} else {
-		writer = f
+	pw := &progressWriter{
+		partIndex: int(part.Index),
+		total:     part.RangeTo - part.RangeFrom,
+		writer:    f,
+		lastSent:  time.Now(),
 	}
 
-	// Start copying content in a goroutine.
-	current := int64(0)
-	finishDownloadChan := make(chan bool)
-	go d.copyContent(resp.Body, writer, finishDownloadChan)
+	finishDownloadChan := make(chan bool, 1)
+	go d.copyContent(resp.Body, pw, finishDownloadChan)
 
-	// Wait for either an interrupt event or a successful completion.
+	var interrupted bool
 	select {
 	case <-ctx.Done():
-		// Close the response body to terminate download.
+		interrupted = true
 		resp.Body.Close()
-		<-finishDownloadChan // wait for cleanup
+		<-finishDownloadChan
 	case <-finishDownloadChan:
-		// Download finished normally.
 	}
 
-	// Update part state and notify fileChan.
-	currentPart := Part{
+	// Save state: RangeFrom is updated to "next byte to download from".
+	// Resume() uses this value directly without adding fi.Size() again.
+	savedPart := Part{
 		Index:     part.Index,
 		URL:       d.url,
 		Path:      part.Path,
-		RangeFrom: part.RangeFrom + current, // update the downloaded offset
+		RangeFrom: part.RangeFrom + pw.downloaded,
 		RangeTo:   part.RangeTo,
 	}
-	stateSaveChan <- currentPart
+	stateSaveChan <- savedPart
 	fileChan <- part.Path
 
-	// Finalize progress bar if used.
-	if DisplayProgressBar() && bar != nil {
-		// Give a small moment for the bar to update.
-		time.Sleep(100 * time.Millisecond)
-		bar.Finish()
+	if !interrupted {
+		if Program != nil {
+			Program.Send(PartDoneMsg{Index: int(part.Index)})
+		}
 	}
 }
 
-// buildRequestForPart prepares the HTTP GET request for a given part including the Range header.
+// buildRequestForPart prepares the HTTP GET request for a given part.
 func (d *HTTPDownloader) buildRequestForPart(ctx context.Context, part Part) (*http.Request, error) {
 	req, err := http.NewRequestWithContext(ctx, "GET", d.url, nil)
 	if err != nil {
 		return nil, err
 	}
 
-	// Add Range header if downloading in parallel.
-	if d.par > 1 {
-		var ranges string
-		// If RangeTo is not the very end, use an explicit range.
+	if d.par > 1 || part.RangeFrom > 0 {
+		var rangeHdr string
 		if part.RangeTo != d.len {
-			ranges = fmt.Sprintf("bytes=%d-%d", part.RangeFrom, part.RangeTo)
+			// Explicit inclusive end byte.
+			rangeHdr = fmt.Sprintf("bytes=%d-%d", part.RangeFrom, part.RangeTo)
 		} else {
-			// Otherwise, download until the end.
-			ranges = fmt.Sprintf("bytes=%d-", part.RangeFrom)
+			// Open-ended: download until EOF.
+			rangeHdr = fmt.Sprintf("bytes=%d-", part.RangeFrom)
 		}
-		req.Header.Add("Range", ranges)
+		req.Header.Add("Range", rangeHdr)
 	}
-	// curl-compatible defaults
+
 	req.Header.Set("Accept", "*/*")
+	// Prevent transparent gzip/br encoding which would invalidate byte offsets.
+	req.Header.Set("Accept-Encoding", "identity")
 	req.Header.Set("User-Agent", defaultUserAgent)
 
 	return req, nil
 }
 
-// copyContent copies data from the response to the writer with an optional weigthed rate limiter.
+// copyContent copies data from the response to the writer with optional rate limiting.
 func (d *HTTPDownloader) copyContent(src io.Reader, dst io.Writer, done chan bool) {
 	defer func() { done <- true }()
 	if d.sharedLimiter != nil {
@@ -477,12 +492,11 @@ func (d *HTTPDownloader) copyContent(src io.Reader, dst io.Writer, done chan boo
 }
 
 // DebugProbe performs HEAD and a 0-0 Range GET to print diagnostics without downloading.
-func DebugProbe(url string, skipTLS bool, proxyServer string) {
-	client := ProxyAwareHTTPClient(proxyServer, skipTLS)
+func DebugProbe(url string, skipTLS bool, proxyServer string, timeout time.Duration) {
+	client := ProxyAwareHTTPClient(proxyServer, skipTLS, timeout)
 
 	Printf("Probing URL: %s\n", url)
 
-	// HEAD
 	headReq, err := http.NewRequest("HEAD", url, nil)
 	if err != nil {
 		Errorf("HEAD build error: %v\n", err)
@@ -491,7 +505,8 @@ func DebugProbe(url string, skipTLS bool, proxyServer string) {
 	headReq.Header.Set("Accept-Encoding", "identity")
 	headReq.Header.Set("User-Agent", defaultUserAgent)
 
-	headResp, err := client.Do(headReq)
+	var headResp *http.Response
+	headResp, err = client.Do(headReq)
 	if err != nil {
 		Errorf("HEAD request error: %v\n", err)
 	} else {
@@ -502,7 +517,6 @@ func DebugProbe(url string, skipTLS bool, proxyServer string) {
 		Printf("HEAD Content-Type: %s\n", headResp.Header.Get("Content-Type"))
 	}
 
-	// Range GET 0-0
 	rangeReq, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		Errorf("Range build error: %v\n", err)
@@ -522,7 +536,6 @@ func DebugProbe(url string, skipTLS bool, proxyServer string) {
 	Printf("Range Content-Range: %s\n", rangeResp.Header.Get("Content-Range"))
 	Printf("Range Content-Length: %s\n", rangeResp.Header.Get(contentLengthHeader))
 
-	// Evaluate
 	var rangeSupported bool
 	if rangeResp.StatusCode == http.StatusPartialContent {
 		rangeSupported = true
@@ -545,10 +558,10 @@ func DebugProbe(url string, skipTLS bool, proxyServer string) {
 		}
 	}
 
-	Printf("Detected Range support: %v\n", rangeSupported)
+	Printf("Range support: %v\n", rangeSupported)
 	if totalLen > 0 {
-		Printf("Detected Content-Length: %d\n", totalLen)
+		Printf("Content-Length: %d bytes (%.1f MB)\n", totalLen, float64(totalLen)/(1024*1024))
 	} else {
-		Printf("Detected Content-Length: unknown\n")
+		Printf("Content-Length: unknown\n")
 	}
 }

@@ -1,54 +1,51 @@
 package main
 
 import (
+	"fmt"
 	"io"
 	"os"
 	"sort"
-
-	"github.com/fatih/color"
-	"gopkg.in/cheggaaa/pb.v1"
 )
 
-// JoinFile joins seperate chunks of file and forms the final downloaded artifact
+// JoinFile joins separate chunks and assembles the final downloaded artifact.
 func JoinFile(files []string, out string) error {
-	//sort with file name or we will join files with wrong order
 	sort.Strings(files)
-	var bar *pb.ProgressBar
 
-	if DisplayProgressBar() {
-		Printf("Start joining \n")
-		bar = pb.StartNew(len(files)).Prefix(color.CyanString("Joining"))
+	Printf("Start joining %d parts\n", len(files))
+	if Program != nil {
+		Program.Send(JoinStartMsg{Total: len(files)})
 	}
 
-	outf, err := os.OpenFile(out, os.O_CREATE|os.O_WRONLY, 0600)
+	outf, err := os.OpenFile(out, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
 	if err != nil {
 		return err
 	}
 	defer outf.Close()
 
-	for _, f := range files {
-		if err = copy(f, outf); err != nil {
+	for i, f := range files {
+		if err = copyChunk(f, outf); err != nil {
 			return err
 		}
-		if DisplayProgressBar() {
-			bar.Increment()
+		if Program != nil {
+			Program.Send(JoinProgressMsg{Current: i + 1})
 		}
 	}
 
-	if DisplayProgressBar() {
-		bar.Finish()
+	if Program != nil {
+		Program.Send(JoinDoneMsg{})
 	}
-
 	return nil
 }
 
-// this function split just to use defer
-func copy(from string, to io.Writer) error {
+// copyChunk copies the contents of a single part file into the destination writer.
+func copyChunk(from string, to io.Writer) error {
 	f, err := os.OpenFile(from, os.O_RDONLY, 0600)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
-	io.Copy(to, f)
+	if _, err := io.Copy(to, f); err != nil {
+		return fmt.Errorf("copying %s: %w", from, err)
+	}
 	return nil
 }
