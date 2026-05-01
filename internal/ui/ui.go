@@ -915,6 +915,97 @@ func ConfirmRedownload(filename string) bool {
 	return proceed
 }
 
+// PrintHelp renders a styled --help screen to stdout.
+func PrintHelp() {
+	// ── Banner ────────────────────────────────────────────────────────────────
+	fmt.Fprintln(Stdout, styleBanner.Render(banner))
+	fmt.Fprintln(Stdout)
+
+	w := 68 // fixed help width
+	sep := styleSep.Render(strings.Repeat("─", w))
+
+	// ── Shared style helpers ──────────────────────────────────────────────────
+	sectionHeader := lipgloss.NewStyle().
+		Foreground(colorPurple).
+		Bold(true).
+		MarginLeft(2)
+
+	flagName := lipgloss.NewStyle().
+		Foreground(colorCyan).
+		Bold(true).
+		Width(20)
+
+	flagDesc := lipgloss.NewStyle().
+		Foreground(colorWhite)
+
+	flagDefault := lipgloss.NewStyle().
+		Foreground(colorMuted)
+
+	usageLine := lipgloss.NewStyle().
+		Foreground(colorGreen).
+		MarginLeft(4)
+
+	exampleLine := lipgloss.NewStyle().
+		Foreground(colorCyan).
+		MarginLeft(4)
+
+	commentLine := lipgloss.NewStyle().
+		Foreground(colorMuted).
+		MarginLeft(4)
+
+	// ── Usage ────────────────────────────────────────────────────────────────
+	fmt.Fprintln(Stdout, sectionHeader.Render("USAGE"))
+	fmt.Fprintln(Stdout, usageLine.Render("hget [options] <url>"))
+	fmt.Fprintln(Stdout, usageLine.Render("hget [options] --resume=<task-name>"))
+	fmt.Fprintln(Stdout, usageLine.Render("hget --file=<urls-file> [options]"))
+	fmt.Fprintln(Stdout)
+	fmt.Fprintln(Stdout, sep)
+	fmt.Fprintln(Stdout)
+
+	// ── Options ───────────────────────────────────────────────────────────────
+	type opt struct{ flag, desc, def string }
+	options := []opt{
+		{"-n <int>", "number of parallel connections", "# of CPUs"},
+		{"--skip-tls", "skip TLS certificate verification", "false"},
+		{"--proxy <addr>", "proxy  (socks5: host:port  |  http: http://host:port)", ""},
+		{"--file <path>", "path to a file containing one URL per line", ""},
+		{"--rate <limit>", "bandwidth cap per download  (e.g. 10kB, 5MiB)", ""},
+		{"--resume <task>", "resume a stopped download by task name or URL", ""},
+		{"--probe <url>", "probe URL for range support & content-length only", ""},
+		{"--timeout <dur>", "timeout waiting for response headers  (e.g. 30s, 1m)", "15s"},
+		{"--verify", "download & GPG-verify the .sig signature file", "false"},
+	}
+
+	fmt.Fprintln(Stdout, sectionHeader.Render("OPTIONS"))
+	for _, o := range options {
+		line := "  " + flagName.Render(o.flag) + "  " + flagDesc.Render(o.desc)
+		if o.def != "" {
+			line += "  " + flagDefault.Render("(default: "+o.def+")")
+		}
+		fmt.Fprintln(Stdout, line)
+	}
+	fmt.Fprintln(Stdout)
+	fmt.Fprintln(Stdout, sep)
+	fmt.Fprintln(Stdout)
+
+	// ── Examples ─────────────────────────────────────────────────────────────
+	fmt.Fprintln(Stdout, sectionHeader.Render("EXAMPLES"))
+
+	examples := []struct{ comment, cmd string }{
+		{"basic download", "hget https://example.com/file.iso"},
+		{"8 connections, 5 MiB/s cap", "hget -n 8 --rate 5MiB https://example.com/large.tar.gz"},
+		{"resume an interrupted download", "hget --resume https://example.com/file.iso"},
+		{"batch download from a file", "hget --file urls.txt"},
+		{"probe server without downloading", "hget --probe https://example.com/file.iso"},
+		{"download & verify GPG signature", "hget --verify https://example.com/file.iso"},
+	}
+	for _, e := range examples {
+		fmt.Fprintln(Stdout, commentLine.Render("# "+e.comment))
+		fmt.Fprintln(Stdout, exampleLine.Render(e.cmd))
+		fmt.Fprintln(Stdout)
+	}
+}
+
 // PrintVerifySummary writes a styled one-line verify result to the terminal
 // using charmbracelet/log (works after the TUI alt-screen has closed).
 func PrintVerifySummary(ok bool, detail string) {

@@ -2,7 +2,6 @@ package main
 
 import (
 	"flag"
-	"fmt"
 	"os"
 	"runtime"
 	"time"
@@ -18,6 +17,8 @@ import (
 var GitCommit string
 
 func main() {
+	flag.Usage = ui.PrintHelp
+
 	var proxy, filePath, bwLimit, resumeTask string
 
 	conn := flag.Int("n", runtime.NumCPU(), "number of connections")
@@ -77,7 +78,7 @@ func main() {
 	if len(args) < 1 {
 		if len(filePath) < 1 {
 			ui.Errorln("A URL or input file with URLs is required")
-			usage()
+			ui.PrintHelp()
 			os.Exit(1)
 		}
 		batch.RunBatchDownloads(filePath, *conn, *skiptls, proxy, bwLimit, *timeout, *verify)
@@ -120,22 +121,4 @@ func main() {
 	if didVerify {
 		ui.PrintVerifySummary(verifyOK, verifyDetail)
 	}
-}
-
-func usage() {
-	fmt.Fprintf(os.Stderr, `Usage:
- hget [options] URL
- hget [options] --resume=TaskName
-
- Options:
-   -n int          number of connections (default number of CPUs)
-   -skip-tls bool  skip certificate verification for https (default false)
-   -proxy string   proxy address (e.g., '127.0.0.1:12345' for socks5 or 'http://proxy.com:8080')
-   -file string    file path containing URLs (one per line)
-   -rate string    bandwidth limit during download (e.g., 10kB, 10MiB)
-   -resume string  resume a stopped download by providing its task name or URL
-   -probe string   probe URL for range and content-length without downloading
-   -timeout        timeout for awaiting response headers (default 15s)
-   --verify        download and GPG-verify the .sig signature file after download
-`)
 }
