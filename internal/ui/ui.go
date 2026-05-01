@@ -196,6 +196,10 @@ type tuiModel struct {
 	logs    []logEntry
 	maxLogs int
 
+	// batch context (0 = not in a batch)
+	batchCurrent int // 1-based index of this download in the batch
+	batchTotal   int // total downloads in the batch
+
 	// lifecycle
 	started    bool
 	done       bool
@@ -220,7 +224,8 @@ type tuiModel struct {
 var Program *tea.Program
 
 // NewTUIModel creates a new TUI model for the given number of connections.
-func NewTUIModel(numConns int, willVerify bool) tuiModel {
+// batchCurrent and batchTotal are 1-based; pass 0,0 when not in batch mode.
+func NewTUIModel(numConns int, willVerify bool, batchCurrent, batchTotal int) tuiModel {
 	s := spinner.New()
 	s.Spinner = spinner.Points
 	s.Style = lipgloss.NewStyle().Foreground(colorPurple)
@@ -230,6 +235,8 @@ func NewTUIModel(numConns int, willVerify bool) tuiModel {
 		spinner:       s,
 		width:         80,
 		willVerify:    willVerify,
+		batchCurrent:  batchCurrent,
+		batchTotal:    batchTotal,
 		overallSpring: harmonica.NewSpring(harmonica.FPS(60), 7.0, 0.85),
 		joinSpring:    harmonica.NewSpring(harmonica.FPS(60), 7.0, 0.85),
 	}
@@ -475,6 +482,25 @@ func (m tuiModel) View() string {
 
 	b.WriteString(styleBanner.Render(banner))
 	b.WriteString("\n\n")
+
+	// Batch progress indicator.
+	if m.batchTotal > 1 {
+		doneSoFar := m.batchCurrent - 1
+		remaining := m.batchTotal - m.batchCurrent
+		batchLine := fmt.Sprintf("  File %d of %d", m.batchCurrent, m.batchTotal)
+		if doneSoFar > 0 {
+			batchLine += fmt.Sprintf("  ·  %s", styleDone.Render(fmt.Sprintf("%d done", doneSoFar)))
+		}
+		if remaining > 0 {
+			batchLine += fmt.Sprintf("  ·  %s", styleValue.Render(fmt.Sprintf("%d left", remaining)))
+		}
+		b.WriteString(lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(colorPurple).
+			Padding(0, 1).
+			Foreground(colorMuted).
+			Render(batchLine) + "\n\n")
+	}
 
 	// Pre-start spinner.
 	if !m.started && !m.hasError {
@@ -781,7 +807,7 @@ func DisplayProgressBar() bool {
 
 // NewProgram creates and starts a new Bubble Tea program for the TUI.
 func NewProgram(numConns int) *tea.Program {
-	model := NewTUIModel(numConns, false)
+	model := NewTUIModel(numConns, false, 0, 0)
 	return tea.NewProgram(model, tea.WithAltScreen())
 }
 

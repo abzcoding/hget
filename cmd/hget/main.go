@@ -62,7 +62,7 @@ func main() {
 				ui.Printf("Reconstructed state from %d part files — resuming.\n", len(st.Parts))
 				runWithTUI(func() {
 					Execute(st.URL, st, *conn, *skiptls, proxy, bwLimit, *timeout)
-				}, *conn, false)
+				}, *conn, false, 0, 0)
 				return
 			}
 			// No part files either — start fresh if it looks like a URL.
@@ -73,12 +73,12 @@ func main() {
 			}
 			runWithTUI(func() {
 				Execute(resumeTask, nil, *conn, *skiptls, proxy, bwLimit, *timeout)
-			}, *conn, false)
+			}, *conn, false, 0, 0)
 			return
 		}
 		runWithTUI(func() {
 			Execute(st.URL, st, *conn, *skiptls, proxy, bwLimit, *timeout)
-		}, *conn, false)
+		}, *conn, false, 0, 0)
 		return
 	}
 
@@ -129,7 +129,7 @@ func main() {
 			verifyOK, verifyDetail = runVerify(downloadURL, *skiptls, proxy, *timeout)
 			didVerify = true
 		}
-	}, *conn, *verify)
+	}, *conn, *verify, 0, 0)
 
 	// After the TUI alt-screen closes, print the verify result to the normal terminal.
 	if didVerify {
@@ -140,9 +140,10 @@ func main() {
 // runWithTUI starts a Bubble Tea program for interactive TTY sessions and runs fn
 // in a background goroutine. Falls back to plain execution when not in a TTY.
 // willVerify informs the TUI model so it can show the verification phase.
-func runWithTUI(fn func(), numConns int, willVerify bool) {
+// batchCurrent/batchTotal are 1-based; pass 0,0 when not in batch mode.
+func runWithTUI(fn func(), numConns int, willVerify bool, batchCurrent, batchTotal int) {
 	if isatty.IsTerminal(os.Stdout.Fd()) && ui.DisplayProgress {
-		model := ui.NewTUIModel(numConns, willVerify)
+		model := ui.NewTUIModel(numConns, willVerify, batchCurrent, batchTotal)
 		p := tea.NewProgram(model, tea.WithAltScreen())
 		ui.Program = p
 		go func() {
@@ -513,7 +514,7 @@ func runBatchDownloads(filePath string, conn int, skiptls bool, proxy, bwLimit s
 					verifyOK, verifyDetail = runVerify(it.url, skiptls, proxy, timeout)
 					didVerify = true
 				}
-			}, conn, verify)
+			}, conn, verify, i+1, len(items))
 		}()
 
 		if didVerify {
