@@ -12,6 +12,7 @@ import (
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/harmonica"
+	"github.com/charmbracelet/huh"
 	"github.com/charmbracelet/lipgloss"
 	charmlog "github.com/charmbracelet/log"
 	"github.com/mattn/go-colorable"
@@ -831,4 +832,95 @@ func (c Console) Errorf(format string, a ...any) (n int, err error) {
 
 func (c Console) Errorln(a ...any) (n int, err error) {
 	return fmt.Fprintln(c.Stderr, a...)
+}
+
+// ── High-level helpers used by cmd layer ──────────────────────────────────────
+
+// RunWithTUI starts a Bubble Tea program for interactive TTY sessions and runs
+// fn in a background goroutine.  Falls back to plain execution when not in a
+// TTY.  willVerify informs the TUI model so it can show the verification phase.
+// batchCurrent/batchTotal are 1-based; pass 0,0 when not in batch mode.
+func RunWithTUI(fn func(), numConns int, willVerify bool, batchCurrent, batchTotal int) {
+	if isatty.IsTerminal(os.Stdout.Fd()) && DisplayProgress {
+		model := NewTUIModel(numConns, willVerify, batchCurrent, batchTotal)
+		p := tea.NewProgram(model, tea.WithAltScreen())
+		Program = p
+
+		// fnDone is closed once fn() (and its defer) have fully completed.
+		// We MUST wait for this before returning so that the next RunWithTUI call
+		// cannot set ui.Program to a new value while the old download goroutines
+		// are still alive and sending PartProgressMsg etc. into it.
+		fnDone := make(chan struct{})
+		go func() {
+			defer close(fnDone)
+			var downloadErr error
+			defer func() {
+				if r := recover(); r != nil {
+					if err, ok := r.(error); ok {
+						downloadErr = err
+					} else {
+						downloadErr = fmt.Errorf("%v", r)
+					}
+				}
+				if downloadErr != nil {
+					p.Send(DownloadErrorMsg{Err: downloadErr})
+				} else {
+					p.Send(DownloadDoneMsg{})
+				}
+			}()
+			fn()
+		}()
+		if _, err := p.Run(); err != nil {
+			fmt.Fprintln(os.Stderr, "TUI error:", err)
+			os.Exit(1)
+		}
+		// Clear the global handle first so that any in-flight progress writes
+		// from the goroutine see nil and stop sending immediately.
+		Program = nil
+		// Now wait for fn() to finish.  This blocks until Execute() returns and
+		// all its child goroutines (downloadPart, dl.Do) have exited, guaranteeing
+		// zero stale messages can reach the next TUI session.
+		<-fnDone
+		return
+	}
+	// Non-TTY: run directly.
+	fn()
+}
+
+// ConfirmRedownload shows a styled huh confirmation prompt asking whether to
+// overwrite an existing file.  Returns true when the user says yes (or when
+// stdout is not a terminal, in which case the download proceeds silently).
+func ConfirmRedownload(filename string) bool {
+	if !isatty.IsTerminal(os.Stdout.Fd()) {
+		return true
+	}
+	labelStyle := lipgloss.NewStyle().Foreground(colorPurple).Bold(true)
+	fileStyle := lipgloss.NewStyle().Foreground(colorCyan)
+
+	fmt.Println()
+	fmt.Println(labelStyle.Render("  ⚠  File already exists:") + " " + fileStyle.Render(filename))
+	fmt.Println()
+
+	var proceed bool
+	f := huh.NewForm(
+		huh.NewGroup(
+			huh.NewConfirm().
+				Title("Download again and overwrite?").
+				Value(&proceed).
+				Affirmative("Yes, overwrite").
+				Negative("No, keep existing"),
+		),
+	)
+	_ = f.Run()
+	return proceed
+}
+
+// PrintVerifySummary writes a styled one-line verify result to the terminal
+// using charmbracelet/log (works after the TUI alt-screen has closed).
+func PrintVerifySummary(ok bool, detail string) {
+	if ok {
+		Printf("Signature valid — %s\n", detail)
+	} else {
+		Errorf("Signature invalid — %s\n", detail)
+	}
 }

@@ -21,6 +21,9 @@ import (
 	"github.com/abzcoding/hget/internal/util"
 )
 
+// Execute is re-exported here for backward compatibility with tests.
+var Execute = downloader.Execute
+
 func makeContent(size int) []byte {
 	data := make([]byte, size)
 	for i := 0; i < size; i++ {
