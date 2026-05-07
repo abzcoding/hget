@@ -1,9 +1,13 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"flag"
 	"os"
+	"os/signal"
 	"runtime"
+	"syscall"
 	"time"
 
 	"github.com/abzcoding/hget/internal/batch"
@@ -40,37 +44,22 @@ func main() {
 		return
 	}
 
+	// Top-level cancellation context.  External SIGINT/SIGTERM/SIGHUP/SIGQUIT
+	// cancel this context with cause = downloader.ErrAbortBatch, which both
+	// the TUI and the downloader/batch loop observe.
+	rootCtx, rootCancel := context.WithCancelCause(context.Background())
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
+	defer signal.Stop(sigCh)
+	go func() {
+		<-sigCh
+		rootCancel(downloader.ErrAbortBatch)
+	}()
+	defer rootCancel(nil)
+
 	// Resume mode.
 	if resumeTask != "" {
-		st, err := state.Resume(resumeTask)
-		if err != nil {
-			if !os.IsNotExist(err) {
-				ui.Errorf("Resume failed: %v\n", err)
-				os.Exit(1)
-			}
-			// No state.json — try to reconstruct from existing part files.
-			st, err = downloader.ReconstructStateFromParts(resumeTask, *skiptls, proxy, *timeout)
-			if err == nil {
-				ui.Printf("Reconstructed state from %d part files — resuming.\n", len(st.Parts))
-				ui.RunWithTUI(func() {
-					downloader.Execute(st.URL, st, *conn, *skiptls, proxy, bwLimit, *timeout)
-				}, *conn, false, 0, 0)
-				return
-			}
-			// No part files either — start fresh if it looks like a URL.
-			ui.Warnf("No saved state found for %q — starting fresh download.\n", resumeTask)
-			if !util.IsURL(resumeTask) {
-				ui.Errorf("No saved state found for task %q and it is not a URL.\n", resumeTask)
-				os.Exit(1)
-			}
-			ui.RunWithTUI(func() {
-				downloader.Execute(resumeTask, nil, *conn, *skiptls, proxy, bwLimit, *timeout)
-			}, *conn, false, 0, 0)
-			return
-		}
-		ui.RunWithTUI(func() {
-			downloader.Execute(st.URL, st, *conn, *skiptls, proxy, bwLimit, *timeout)
-		}, *conn, false, 0, 0)
+		runResume(rootCtx, resumeTask, *conn, *skiptls, proxy, bwLimit, *timeout)
 		return
 	}
 
@@ -81,7 +70,7 @@ func main() {
 			ui.PrintHelp()
 			os.Exit(1)
 		}
-		batch.RunBatchDownloads(filePath, *conn, *skiptls, proxy, bwLimit, *timeout, *verify)
+		batch.RunBatchDownloads(rootCtx, filePath, *conn, *skiptls, proxy, bwLimit, *timeout, *verify)
 		return
 	}
 
@@ -106,19 +95,80 @@ func main() {
 		util.FatalCheck(err)
 	}
 
+	itemCtx, cancelItem := context.WithCancelCause(rootCtx)
+	defer cancelItem(nil)
+
 	var verifyOK bool
 	var verifyDetail string
 	var didVerify bool
 
-	ui.RunWithTUI(func() {
-		downloader.Execute(downloadURL, nil, *conn, *skiptls, proxy, bwLimit, *timeout)
+	runErr := ui.RunWithTUI(ui.RunOptions{
+		Ctx:          itemCtx,
+		OnQuit:       func() { cancelItem(downloader.ErrUserQuit) },
+		NumConns:     *conn,
+		WillVerify:   *verify,
+		BatchCurrent: 0,
+		BatchTotal:   0,
+	}, func() error {
+		if err := downloader.Execute(itemCtx, downloadURL, nil, *conn, *skiptls, proxy, bwLimit, *timeout); err != nil {
+			return err
+		}
 		if *verify {
 			verifyOK, verifyDetail = downloader.RunVerify(downloadURL, *skiptls, proxy, *timeout)
 			didVerify = true
 		}
-	}, *conn, *verify, 0, 0)
+		return nil
+	})
 
 	if didVerify {
 		ui.PrintVerifySummary(verifyOK, verifyDetail)
 	}
+
+	if runErr != nil &&
+		!errors.Is(runErr, downloader.ErrUserQuit) &&
+		!errors.Is(runErr, downloader.ErrAbortBatch) &&
+		!errors.Is(runErr, context.Canceled) {
+		os.Exit(1)
+	}
+}
+
+// runResume handles --resume in both forms (task-name and URL).
+func runResume(rootCtx context.Context, resumeTask string, conn int, skiptls bool, proxy, bwLimit string, timeout time.Duration) {
+	st, err := state.Resume(resumeTask)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			ui.Errorf("Resume failed: %v\n", err)
+			os.Exit(1)
+		}
+		// No state.json — try to reconstruct from existing part files.
+		st, err = downloader.ReconstructStateFromParts(resumeTask, skiptls, proxy, timeout)
+		if err == nil {
+			ui.Printf("Reconstructed state from %d part files — resuming.\n", len(st.Parts))
+			runOne(rootCtx, st.URL, st, conn, skiptls, proxy, bwLimit, timeout)
+			return
+		}
+		// No part files either — start fresh if it looks like a URL.
+		ui.Warnf("No saved state found for %q — starting fresh download.\n", resumeTask)
+		if !util.IsURL(resumeTask) {
+			ui.Errorf("No saved state found for task %q and it is not a URL.\n", resumeTask)
+			os.Exit(1)
+		}
+		runOne(rootCtx, resumeTask, nil, conn, skiptls, proxy, bwLimit, timeout)
+		return
+	}
+	runOne(rootCtx, st.URL, st, conn, skiptls, proxy, bwLimit, timeout)
+}
+
+func runOne(rootCtx context.Context, url string, st *state.State, conn int, skiptls bool, proxy, bwLimit string, timeout time.Duration) {
+	itemCtx, cancelItem := context.WithCancelCause(rootCtx)
+	defer cancelItem(nil)
+
+	_ = ui.RunWithTUI(ui.RunOptions{
+		Ctx:        itemCtx,
+		OnQuit:     func() { cancelItem(downloader.ErrUserQuit) },
+		NumConns:   conn,
+		WillVerify: false,
+	}, func() error {
+		return downloader.Execute(itemCtx, url, st, conn, skiptls, proxy, bwLimit, timeout)
+	})
 }

@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"math"
@@ -63,6 +64,7 @@ var (
 			Width(14)
 
 	styleHelp      = lipgloss.NewStyle().Foreground(colorMuted)
+	styleHelpKey   = lipgloss.NewStyle().Foreground(colorPurple).Bold(true)
 	styleDone      = lipgloss.NewStyle().Foreground(colorGreen).Bold(true)
 	styleETA       = lipgloss.NewStyle().Foreground(colorYellow)
 	styleError     = lipgloss.NewStyle().Foreground(colorRed).Bold(true)
@@ -73,6 +75,18 @@ var (
 			BorderForeground(colorRed).
 			Padding(0, 2).
 			Foreground(colorWhite)
+	styleStopBox = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(colorYellow).
+			Padding(0, 2).
+			Foreground(colorYellow).
+			Bold(true)
+	styleSkipBox = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(colorCyan).
+			Padding(0, 2).
+			Foreground(colorCyan).
+			Bold(true)
 )
 
 const banner = `  ██╗  ██╗  ██████╗  ███████╗ ████████╗
@@ -138,6 +152,17 @@ type tickMsg time.Time
 
 // autoQuitMsg is sent after the completion delay to quit the TUI.
 type autoQuitMsg struct{}
+
+// StoppingMsg is sent when an external cancellation (e.g. SIGINT routed
+// through signal.NotifyContext) has been requested.  The TUI overlays a
+// "stopping" panel until the worker goroutine reports completion.
+type StoppingMsg struct {
+	// Reason renders inside the stopping panel; e.g. "Aborted by user".
+	Reason string
+}
+
+// SkippingMsg overlays a "skipping" panel for the current batch item.
+type SkippingMsg struct{}
 
 // ── Per-part model ────────────────────────────────────────────────────────────
 
@@ -214,6 +239,16 @@ type tuiModel struct {
 	verifyOK     bool
 	verifyDetail string
 
+	// cancellation hooks — invoked from the key handler.  onSkip is nil
+	// when skipping is not allowed (single-download mode).
+	onSkip func()
+	onQuit func()
+
+	// stopping/skipping overlays
+	stopping       bool
+	stoppingReason string
+	skipping       bool
+
 	// spinner (pre-start and verify)
 	spinner spinner.Model
 
@@ -226,7 +261,9 @@ var Program *tea.Program
 
 // NewTUIModel creates a new TUI model for the given number of connections.
 // batchCurrent and batchTotal are 1-based; pass 0,0 when not in batch mode.
-func NewTUIModel(numConns int, willVerify bool, batchCurrent, batchTotal int) tuiModel {
+// onSkip is non-nil only in batch mode and is invoked when the user presses
+// 's'.  onQuit is invoked on 'q' / 'ctrl+c'; both default to no-ops if nil.
+func NewTUIModel(numConns int, willVerify bool, batchCurrent, batchTotal int, onSkip, onQuit func()) tuiModel {
 	s := spinner.New()
 	s.Spinner = spinner.Points
 	s.Style = lipgloss.NewStyle().Foreground(colorPurple)
@@ -240,6 +277,8 @@ func NewTUIModel(numConns int, willVerify bool, batchCurrent, batchTotal int) tu
 		batchTotal:    batchTotal,
 		overallSpring: harmonica.NewSpring(harmonica.FPS(60), 7.0, 0.85),
 		joinSpring:    harmonica.NewSpring(harmonica.FPS(60), 7.0, 0.85),
+		onSkip:        onSkip,
+		onQuit:        onQuit,
 	}
 }
 
@@ -272,8 +311,27 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyMsg:
-		if msg.String() == "q" || msg.String() == "Q" || msg.String() == "ctrl+c" {
-			return m, tea.Quit
+		switch msg.String() {
+		case "q", "Q", "ctrl+c":
+			// First press: request a graceful cancellation and stay on
+			// screen so the user sees "Stopping…" while state is saved.
+			// Second press: hard-quit the TUI immediately.
+			if m.stopping {
+				return m, tea.Quit
+			}
+			m.stopping = true
+			m.stoppingReason = "Aborted by user — saving state"
+			if m.onQuit != nil {
+				m.onQuit()
+			}
+			return m, m.spinner.Tick
+		case "s", "S":
+			if m.onSkip == nil || m.skipping || m.stopping {
+				return m, nil
+			}
+			m.skipping = true
+			m.onSkip()
+			return m, m.spinner.Tick
 		}
 
 	case spinner.TickMsg:
@@ -407,6 +465,23 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.verifyDetail = msg.Detail
 		return m, nil
 
+	case StoppingMsg:
+		if !m.stopping {
+			m.stopping = true
+			if msg.Reason != "" {
+				m.stoppingReason = msg.Reason
+			} else {
+				m.stoppingReason = "Stopping — saving state"
+			}
+		}
+		return m, m.spinner.Tick
+
+	case SkippingMsg:
+		if !m.skipping {
+			m.skipping = true
+		}
+		return m, m.spinner.Tick
+
 	case DownloadDoneMsg:
 		m.done = true
 		return m, autoQuitCmd()
@@ -506,8 +581,11 @@ func (m tuiModel) View() string {
 	// Pre-start spinner.
 	if !m.started && !m.hasError {
 		b.WriteString("  " + m.spinner.View() + "  Resolving…\n")
+		if m.stopping || m.skipping {
+			b.WriteString("\n" + m.renderStopOverlay() + "\n")
+		}
 		b.WriteString(sep + "\n")
-		b.WriteString(styleHelp.Render("  q quit"))
+		b.WriteString(m.renderFooter())
 		return b.String()
 	}
 
@@ -516,7 +594,7 @@ func (m tuiModel) View() string {
 		b.WriteString("  " + styleError.Render("✗  Download failed") + "\n\n")
 		b.WriteString("  " + styleErrBox.Render(m.errMsg) + "\n\n")
 		b.WriteString(sep + "\n")
-		b.WriteString(styleHelp.Render("  closing in 3 s  •  q quit now"))
+		b.WriteString(styleHelp.Render("  closing in 3 s  •  ") + styleHelpKey.Render("q") + styleHelp.Render(" quit now"))
 		return b.String()
 	}
 
@@ -565,15 +643,18 @@ func (m tuiModel) View() string {
 			}
 		}
 		b.WriteString("\n" + sep + "\n")
-		b.WriteString(styleHelp.Render("  closing in 3 s  •  q quit now"))
+		b.WriteString(styleHelp.Render("  closing in 3 s  •  ") + styleHelpKey.Render("q") + styleHelp.Render(" quit now"))
 		return b.String()
 	}
 
 	// Verifying phase (download+join complete, waiting for GPG result).
 	if m.verifying && !m.done {
 		b.WriteString("  " + m.spinner.View() + "  Verifying GPG signature…\n")
+		if m.stopping || m.skipping {
+			b.WriteString("\n" + m.renderStopOverlay() + "\n")
+		}
 		b.WriteString(sep + "\n")
-		b.WriteString(styleHelp.Render("  q quit"))
+		b.WriteString(m.renderFooter())
 		return b.String()
 	}
 
@@ -646,10 +727,48 @@ func (m tuiModel) View() string {
 		}
 	}
 
+	// Stopping / skipping overlay (rendered above the footer so it stays
+	// visible while we wait for the worker goroutine to finish saving state).
+	if m.stopping || m.skipping {
+		b.WriteString("\n" + m.renderStopOverlay() + "\n")
+	}
+
 	// Footer.
 	b.WriteString("\n" + sep + "\n")
-	b.WriteString(styleHelp.Render("  q quit  •  ctrl+c abort"))
+	b.WriteString(m.renderFooter())
 	return b.String()
+}
+
+// renderStopOverlay produces the yellow/cyan boxed "stopping…" / "skipping…"
+// banner shown while the worker goroutine is still draining.  It mirrors the
+// styling of the verify completion box so the UI feels consistent.
+func (m tuiModel) renderStopOverlay() string {
+	if m.skipping && !m.stopping {
+		text := "  " + m.spinner.View() + "  Skipping current download — discarding parts"
+		return styleSkipBox.Render(text)
+	}
+	reason := m.stoppingReason
+	if reason == "" {
+		reason = "Stopping — saving state"
+	}
+	text := "  " + m.spinner.View() + "  " + reason
+	return styleStopBox.Render(text)
+}
+
+// renderFooter renders the bottom help bar.  Keys are colored differently from
+// their descriptions so the available actions read at a glance.
+func (m tuiModel) renderFooter() string {
+	var parts []string
+	if m.stopping {
+		parts = append(parts, styleHelp.Render("press ")+styleHelpKey.Render("q")+styleHelp.Render(" again to force-quit"))
+	} else {
+		if m.onSkip != nil {
+			parts = append(parts, styleHelpKey.Render("s")+styleHelp.Render(" skip item"))
+		}
+		parts = append(parts, styleHelpKey.Render("q")+styleHelp.Render(" stop & save"))
+		parts = append(parts, styleHelpKey.Render("ctrl+c")+styleHelp.Render(" abort"))
+	}
+	return "  " + strings.Join(parts, styleHelp.Render("  •  "))
 }
 
 func logIconStyle(level string) (string, lipgloss.Style) {
@@ -808,7 +927,7 @@ func DisplayProgressBar() bool {
 
 // NewProgram creates and starts a new Bubble Tea program for the TUI.
 func NewProgram(numConns int) *tea.Program {
-	model := NewTUIModel(numConns, false, 0, 0)
+	model := NewTUIModel(numConns, false, 0, 0, nil, nil)
 	return tea.NewProgram(model, tea.WithAltScreen())
 }
 
@@ -836,39 +955,77 @@ func (c Console) Errorln(a ...any) (n int, err error) {
 
 // ── High-level helpers used by cmd layer ──────────────────────────────────────
 
+// RunOptions configures a TUI session.
+type RunOptions struct {
+	// Ctx is observed for external cancellation (e.g. SIGINT routed through
+	// signal.NotifyContext at main).  When Ctx is cancelled, RunWithTUI
+	// surfaces a "stopping…" overlay and waits for fn to drain.
+	Ctx context.Context
+	// OnSkip is called when the user presses 's' (batch mode only).
+	OnSkip func()
+	// OnQuit is called when the user presses 'q' / 'ctrl+c'.
+	OnQuit       func()
+	NumConns     int
+	WillVerify   bool
+	BatchCurrent int
+	BatchTotal   int
+}
+
 // RunWithTUI starts a Bubble Tea program for interactive TTY sessions and runs
 // fn in a background goroutine.  Falls back to plain execution when not in a
-// TTY.  willVerify informs the TUI model so it can show the verification phase.
-// batchCurrent/batchTotal are 1-based; pass 0,0 when not in batch mode.
-func RunWithTUI(fn func(), numConns int, willVerify bool, batchCurrent, batchTotal int) {
+// TTY.  Returns the error returned by fn (or recovered from a panic inside
+// it), so callers can distinguish skip vs abort vs failure.
+func RunWithTUI(opts RunOptions, fn func() error) error {
 	if isatty.IsTerminal(os.Stdout.Fd()) && DisplayProgress {
-		model := NewTUIModel(numConns, willVerify, batchCurrent, batchTotal)
-		p := tea.NewProgram(model, tea.WithAltScreen())
+		model := NewTUIModel(opts.NumConns, opts.WillVerify, opts.BatchCurrent, opts.BatchTotal, opts.OnSkip, opts.OnQuit)
+		// Disable bubbletea's built-in SIGINT handler so external signals are
+		// handled by the parent context (signal.NotifyContext at main).  This
+		// keeps cancellation routing single-source and lets us show a real
+		// "stopping…" overlay instead of dropping the alt-screen.
+		p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithoutSignalHandler())
 		Program = p
+
+		// Watch the parent context: if it gets cancelled (external SIGINT or
+		// the caller decided to abort), surface the stopping overlay so the
+		// user sees what's happening while state is being saved.
+		stopWatch := make(chan struct{})
+		if opts.Ctx != nil {
+			go func() {
+				select {
+				case <-opts.Ctx.Done():
+					reason := "Aborted — saving state"
+					if cause := context.Cause(opts.Ctx); cause != nil && cause != opts.Ctx.Err() {
+						reason = "Aborted (" + cause.Error() + ") — saving state"
+					}
+					p.Send(StoppingMsg{Reason: reason})
+				case <-stopWatch:
+				}
+			}()
+		}
 
 		// fnDone is closed once fn() (and its defer) have fully completed.
 		// We MUST wait for this before returning so that the next RunWithTUI call
 		// cannot set ui.Program to a new value while the old download goroutines
 		// are still alive and sending PartProgressMsg etc. into it.
 		fnDone := make(chan struct{})
+		var fnErr error
 		go func() {
 			defer close(fnDone)
-			var downloadErr error
 			defer func() {
 				if r := recover(); r != nil {
 					if err, ok := r.(error); ok {
-						downloadErr = err
+						fnErr = err
 					} else {
-						downloadErr = fmt.Errorf("%v", r)
+						fnErr = fmt.Errorf("%v", r)
 					}
 				}
-				if downloadErr != nil {
-					p.Send(DownloadErrorMsg{Err: downloadErr})
+				if fnErr != nil {
+					p.Send(DownloadErrorMsg{Err: fnErr})
 				} else {
 					p.Send(DownloadDoneMsg{})
 				}
 			}()
-			fn()
+			fnErr = fn()
 		}()
 		if _, err := p.Run(); err != nil {
 			fmt.Fprintln(os.Stderr, "TUI error:", err)
@@ -877,14 +1034,15 @@ func RunWithTUI(fn func(), numConns int, willVerify bool, batchCurrent, batchTot
 		// Clear the global handle first so that any in-flight progress writes
 		// from the goroutine see nil and stop sending immediately.
 		Program = nil
+		close(stopWatch)
 		// Now wait for fn() to finish.  This blocks until Execute() returns and
 		// all its child goroutines (downloadPart, dl.Do) have exited, guaranteeing
 		// zero stale messages can reach the next TUI session.
 		<-fnDone
-		return
+		return fnErr
 	}
 	// Non-TTY: run directly.
-	fn()
+	return fn()
 }
 
 // ConfirmRedownload shows a styled huh confirmation prompt asking whether to

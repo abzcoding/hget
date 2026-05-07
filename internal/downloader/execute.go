@@ -1,11 +1,11 @@
 package downloader
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
-	"os/signal"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/abzcoding/hget/internal/joiner"
@@ -14,24 +14,37 @@ import (
 	"github.com/abzcoding/hget/internal/util"
 )
 
-// Execute configures the HTTPDownloader and uses it to download the target.
-func Execute(url string, st *state.State, conn int, skiptls bool, proxyServer string, bwLimit string, timeout time.Duration) {
-	// Capture OS interrupt signals.
-	signalChan := make(chan os.Signal, 1)
-	signal.Notify(signalChan,
-		syscall.SIGHUP,
-		syscall.SIGINT,
-		syscall.SIGTERM,
-		syscall.SIGQUIT)
-	defer signal.Stop(signalChan)
+// Cancellation causes used as the second argument to context.CancelCauseFunc.
+// Execute and the batch loop use these to distinguish user intent.
+var (
+	// ErrSkipCurrent — user requested to skip the current download
+	// (state is discarded, batch continues).
+	ErrSkipCurrent = errors.New("skip current item")
 
-	var isInterrupted = false
+	// ErrAbortBatch — user wants the entire batch to stop immediately
+	// (state is saved when resumable, no further items are started).
+	ErrAbortBatch = errors.New("abort batch")
 
+	// ErrUserQuit — single-download equivalent of ErrAbortBatch.
+	// State is saved when resumable.
+	ErrUserQuit = errors.New("user quit")
+)
+
+// Execute downloads url, observing ctx for cancellation.
+// Returns:
+//   - nil on success;
+//   - context.Cause(ctx) (one of ErrSkipCurrent, ErrAbortBatch, ErrUserQuit,
+//     or context.Canceled) when ctx was cancelled;
+//   - the underlying download/IO error on failure.
+//
+// Execute always waits for every part goroutine to exit before returning,
+// guaranteeing that no orphaned goroutines from the previous run can write
+// into a future TUI session's ui.Program handle.
+func Execute(ctx context.Context, url string, st *state.State, conn int, skiptls bool, proxyServer string, bwLimit string, timeout time.Duration) error {
 	var dl *HTTPDownloader
 	if st == nil {
 		dl = NewHTTPDownloader(url, conn, skiptls, proxyServer, bwLimit, timeout)
 	} else {
-		// Rebuild client with current connection settings so proxy/TLS/timeout are honoured.
 		client := ProxyAwareHTTPClient(proxyServer, skiptls, timeout)
 		dl = NewHTTPDownloaderFromState(st, client, proxyServer, skiptls, timeout)
 		if ui.Program != nil {
@@ -55,58 +68,113 @@ func Execute(url string, st *state.State, conn int, skiptls bool, proxyServer st
 
 	var parts []state.Part
 	var files []string
+	var firstErr error
+	interrupted := false
+
+	broadcastInterrupt := func() {
+		if interrupted {
+			return
+		}
+		interrupted = true
+		for i := 0; i < numParts; i++ {
+			select {
+			case interruptChan <- true:
+			default:
+			}
+		}
+	}
 
 loop:
 	for {
 		select {
-		case <-signalChan:
-			if !isInterrupted {
-				isInterrupted = true
-				for i := 0; i < numParts; i++ {
-					interruptChan <- true
-				}
-			}
+		case <-ctx.Done():
+			broadcastInterrupt()
 		case file := <-fileChan:
 			files = append(files, file)
 		case err := <-errorChan:
-			ui.Errorf("%v\n", err)
-			if ui.Program != nil {
-				ui.Program.Send(ui.DownloadErrorMsg{Err: err})
-			} else {
-				os.Exit(1)
+			if firstErr == nil {
+				firstErr = err
 			}
-			return
+			// Cancel siblings; keep draining until they all report back so we
+			// never leak goroutines into the next TUI session.
+			broadcastInterrupt()
 		case part := <-stateChan:
 			parts = append(parts, part)
 		case <-doneChan:
-			// Drain remaining in-flight notifications.
+			// Drain remaining in-flight notifications from any goroutines
+			// that finished after doneChan was signalled.
 			for len(files) < numParts {
-				files = append(files, <-fileChan)
+				select {
+				case f := <-fileChan:
+					files = append(files, f)
+				default:
+					files = append(files, "")
+				}
 			}
 			for len(parts) < numParts {
-				parts = append(parts, <-stateChan)
+				select {
+				case p := <-stateChan:
+					parts = append(parts, p)
+				default:
+					parts = append(parts, state.Part{})
+				}
 			}
 			break loop
 		}
 	}
 
-	if isInterrupted {
-		if dl.IsResumable() {
+	if interrupted {
+		cause := context.Cause(ctx)
+		if cause == nil && firstErr != nil {
+			cause = firstErr
+		}
+		folder := state.FolderOf(url)
+
+		switch {
+		case errors.Is(cause, ErrSkipCurrent):
+			// User asked to skip — discard partial state; batch will move on.
+			ui.Warnf("Skipped — discarding partial download for %s\n", util.TaskFromURL(url))
+			_ = os.RemoveAll(folder)
+		case dl.IsResumable():
 			ui.Printf("Interrupted — saving state…\n")
 			s := &state.State{URL: url, Parts: parts}
 			if err := s.Save(); err != nil {
 				ui.Errorf("Save failed: %v\n", err)
 			}
-		} else {
+		default:
 			ui.Warnf("Interrupted, download is not resumable.\n")
 		}
-		return
+
+		if firstErr != nil && cause == firstErr {
+			if ui.Program != nil {
+				ui.Program.Send(ui.DownloadErrorMsg{Err: firstErr})
+			}
+			return firstErr
+		}
+		if cause != nil {
+			return cause
+		}
+		return context.Canceled
+	}
+
+	if firstErr != nil {
+		ui.Errorf("%v\n", firstErr)
+		if ui.Program != nil {
+			ui.Program.Send(ui.DownloadErrorMsg{Err: firstErr})
+		}
+		return firstErr
 	}
 
 	// Collect part files from the temp folder (source of truth, avoids channel races).
 	folder := state.FolderOf(url)
 	entries, readErr := os.ReadDir(folder)
-	util.FatalCheck(readErr)
+	if readErr != nil {
+		err := fmt.Errorf("read parts directory: %w", readErr)
+		if ui.Program != nil {
+			ui.Program.Send(ui.DownloadErrorMsg{Err: err})
+		}
+		return err
+	}
 	files = files[:0]
 	prefix := util.TaskFromURL(url) + ".part"
 	for _, e := range entries {
@@ -120,18 +188,19 @@ loop:
 		if ui.Program != nil {
 			ui.Program.Send(ui.DownloadErrorMsg{Err: err})
 		}
-		return
+		return err
 	}
 	if err := os.RemoveAll(state.FolderOf(url)); err != nil {
 		ui.Warnf("Cleanup failed: %v\n", err)
 	}
+	return nil
 }
 
 // RunVerify downloads the .sig file for url and runs gpg --verify.
 // It sends TUI messages when ui.Program is active (during the TUI alt-screen).
 // It always returns (ok, detail) so the caller can print a post-TUI summary.
 func RunVerify(url string, skipTLS bool, proxyServer string, timeout time.Duration) (ok bool, detail string) {
-	sigURL := url + ".sig"
+	sigURL := buildSigURL(url)
 	destFile := util.TaskFromURL(url)
 	sigFile := destFile + ".sig"
 

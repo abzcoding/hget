@@ -4,12 +4,28 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	stdurl "net/url"
 	"os"
 	"os/exec"
 	"regexp"
 	"strings"
 	"time"
 )
+
+// buildSigURL appends ".sig" to the *path* of a URL while preserving query
+// strings and fragments — so e.g. "https://x/file.iso?token=abc" becomes
+// "https://x/file.iso.sig?token=abc", not "…iso?token=abc.sig".
+func buildSigURL(rawURL string) string {
+	u, err := stdurl.Parse(rawURL)
+	if err != nil || u.Path == "" {
+		return rawURL + ".sig"
+	}
+	u.Path += ".sig"
+	if u.RawPath != "" {
+		u.RawPath += ".sig"
+	}
+	return u.String()
+}
 
 // DownloadSigFile fetches the detached GPG signature file at sigURL and writes
 // it to destPath.  It reuses the same proxy/TLS settings as the main download.

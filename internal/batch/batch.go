@@ -2,6 +2,8 @@ package batch
 
 import (
 	"bufio"
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -16,11 +18,18 @@ import (
 )
 
 // RunBatchDownloads reads URLs from filePath and downloads them one by one,
-// printing a live queue panel before each download and a final summary afterwards.
-func RunBatchDownloads(filePath string, conn int, skiptls bool, proxy, bwLimit string, timeout time.Duration, verify bool) {
+// printing a live queue panel before each download and a final summary
+// afterwards.  ctx is the *batch* cancellation context — when it is cancelled
+// (typically by SIGINT routed through signal.NotifyContext, or by the user
+// pressing 'q' in the TUI) the loop exits cleanly and remaining items are
+// reported as "aborted".
+func RunBatchDownloads(ctx context.Context, filePath string, conn int, skiptls bool, proxy, bwLimit string, timeout time.Duration, verify bool) {
 	// ── Read and validate URL list ────────────────────────────────────────────
 	f, err := os.Open(filePath)
-	util.FatalCheck(err)
+	if err != nil {
+		ui.Errorf("could not open URL list %s: %v\n", filePath, err)
+		return
+	}
 	defer f.Close()
 
 	var urls []string
@@ -32,7 +41,10 @@ func RunBatchDownloads(filePath string, conn int, skiptls bool, proxy, bwLimit s
 		}
 		urls = append(urls, line)
 	}
-	util.FatalCheck(scanner.Err())
+	if scanErr := scanner.Err(); scanErr != nil {
+		ui.Errorf("error reading %s: %v\n", filePath, scanErr)
+		return
+	}
 
 	if len(urls) == 0 {
 		ui.Warnf("No URLs found in %s\n", filePath)
@@ -55,6 +67,7 @@ func RunBatchDownloads(filePath string, conn int, skiptls bool, proxy, bwLimit s
 	styleDone := lipgloss.NewStyle().Foreground(cGreen).Bold(true)
 	styleFail := lipgloss.NewStyle().Foreground(cRed).Bold(true)
 	styleSkip := lipgloss.NewStyle().Foreground(cYellow)
+	styleAbort := lipgloss.NewStyle().Foreground(cYellow).Bold(true)
 	stylePending := lipgloss.NewStyle().Foreground(cMuted)
 	styleActive := lipgloss.NewStyle().Foreground(cCyan).Bold(true)
 	styleMuted := lipgloss.NewStyle().Foreground(cMuted)
@@ -75,6 +88,7 @@ func RunBatchDownloads(filePath string, conn int, skiptls bool, proxy, bwLimit s
 		statusDone
 		statusFailed
 		statusSkipped
+		statusAborted
 	)
 
 	type item struct {
@@ -91,7 +105,7 @@ func RunBatchDownloads(filePath string, conn int, skiptls bool, proxy, bwLimit s
 
 	// printQueuePanel renders the current queue state to stdout.
 	printQueuePanel := func(activeIdx int) {
-		done, failed, skipped := 0, 0, 0
+		done, failed, skipped, aborted := 0, 0, 0, 0
 		for _, it := range items {
 			switch it.status {
 			case statusDone:
@@ -100,11 +114,16 @@ func RunBatchDownloads(filePath string, conn int, skiptls bool, proxy, bwLimit s
 				failed++
 			case statusSkipped:
 				skipped++
+			case statusAborted:
+				aborted++
 			}
 		}
-		remaining := len(items) - done - failed - skipped
+		remaining := len(items) - done - failed - skipped - aborted
 		if activeIdx >= 0 {
 			remaining-- // the active one is not "remaining"
+		}
+		if remaining < 0 {
+			remaining = 0
 		}
 
 		hdr := fmt.Sprintf("  Batch  ·  %d file", len(items))
@@ -114,11 +133,17 @@ func RunBatchDownloads(filePath string, conn int, skiptls bool, proxy, bwLimit s
 		if verify {
 			hdr += "  ·  verify on"
 		}
-		if done+failed+skipped > 0 {
-			hdr += fmt.Sprintf("  ·  %d done", done+skipped)
-			if failed > 0 {
-				hdr += fmt.Sprintf("  ·  %d failed", failed)
-			}
+		if done > 0 {
+			hdr += fmt.Sprintf("  ·  %d done", done)
+		}
+		if skipped > 0 {
+			hdr += fmt.Sprintf("  ·  %d skipped", skipped)
+		}
+		if failed > 0 {
+			hdr += fmt.Sprintf("  ·  %d failed", failed)
+		}
+		if aborted > 0 {
+			hdr += fmt.Sprintf("  ·  %d aborted", aborted)
 		}
 		if remaining > 0 {
 			hdr += fmt.Sprintf("  ·  %d left", remaining)
@@ -148,7 +173,14 @@ func RunBatchDownloads(filePath string, conn int, skiptls bool, proxy, bwLimit s
 			case statusSkipped:
 				icon = styleSkip.Render("  ─")
 				nameStr = styleSkip.Render(fname)
-				statusStr = styleSkip.Render("skipped (exists)")
+				statusStr = styleSkip.Render("skipped")
+				if it.reason != "" {
+					statusStr += "  " + styleMuted.Render("("+truncateSummary(it.reason, 35)+")")
+				}
+			case statusAborted:
+				icon = styleAbort.Render("  ⊘")
+				nameStr = styleAbort.Render(fname)
+				statusStr = styleAbort.Render("aborted")
 			case statusActive:
 				icon = styleActive.Render("  ⬇")
 				nameStr = styleActive.Render(fname)
@@ -158,7 +190,7 @@ func RunBatchDownloads(filePath string, conn int, skiptls bool, proxy, bwLimit s
 				nameStr = stylePending.Render(fname)
 				statusStr = stylePending.Render("pending")
 			}
-			padded := nameStr + strings.Repeat(" ", max(0, 42-len(it.file)))
+			padded := nameStr + strings.Repeat(" ", max(0, 42-len(fname)))
 			fmt.Printf("%s  %s  %s\n", icon, padded, statusStr)
 		}
 		fmt.Println()
@@ -167,11 +199,21 @@ func RunBatchDownloads(filePath string, conn int, skiptls bool, proxy, bwLimit s
 
 	// ── Per-URL download loop ─────────────────────────────────────────────────
 	for i := range items {
+		// Honour an external abort (SIGINT, q during a previous item, etc.)
+		// before starting the next download.
+		if ctx.Err() != nil {
+			for j := i; j < len(items); j++ {
+				if items[j].status == statusPending {
+					items[j].status = statusAborted
+				}
+			}
+			break
+		}
+
 		it := &items[i]
 		it.status = statusActive
 		printQueuePanel(i)
 
-		var itemOK = true
 		var itemReason string
 
 		fmt.Printf("\n  %s  %s\n",
@@ -185,19 +227,15 @@ func RunBatchDownloads(filePath string, conn int, skiptls bool, proxy, bwLimit s
 		if _, statErr := os.Stat(it.file); statErr == nil {
 			if !ui.ConfirmRedownload(it.file) {
 				ui.Warnf("Skipping — %s already exists.\n", it.file)
+				it.status = statusSkipped
+				it.reason = "already exists"
 				if verify {
 					ok, detail := downloader.RunVerify(it.url, skiptls, proxy, timeout)
 					ui.PrintVerifySummary(ok, detail)
 					if !ok {
-						itemOK = false
-						itemReason = detail
+						it.status = statusFailed
+						it.reason = detail
 					}
-				}
-				if itemOK {
-					it.status = statusSkipped
-				} else {
-					it.status = statusFailed
-					it.reason = itemReason
 				}
 				fmt.Println()
 				continue
@@ -211,64 +249,113 @@ func RunBatchDownloads(filePath string, conn int, skiptls bool, proxy, bwLimit s
 			}
 		}
 
+		// Per-item context derived from the batch context, with cancel
+		// causes to distinguish skip vs abort.
+		itemCtx, cancelItem := context.WithCancelCause(ctx)
+
 		var verifyOK bool
 		var verifyDetail string
 		var didVerify bool
 
-		func() {
-			defer func() {
-				if r := recover(); r != nil {
-					itemOK = false
-					if e, ok := r.(error); ok {
-						itemReason = e.Error()
-					} else {
-						itemReason = fmt.Sprintf("%v", r)
-					}
+		runErr := ui.RunWithTUI(ui.RunOptions{
+			Ctx: itemCtx,
+			OnSkip: func() {
+				cancelItem(downloader.ErrSkipCurrent)
+			},
+			OnQuit: func() {
+				// 'q' in batch mode aborts the entire batch — cancel the
+				// parent context indirectly by cancelling this item with
+				// ErrAbortBatch and signalling the outer loop below.
+				cancelItem(downloader.ErrAbortBatch)
+			},
+			NumConns:     conn,
+			WillVerify:   verify,
+			BatchCurrent: i + 1,
+			BatchTotal:   len(items),
+		}, func() error {
+			if err := downloader.Execute(itemCtx, it.url, nil, conn, skiptls, proxy, bwLimit, timeout); err != nil {
+				return err
+			}
+			if verify {
+				verifyOK, verifyDetail = downloader.RunVerify(it.url, skiptls, proxy, timeout)
+				didVerify = true
+				if !verifyOK {
+					return fmt.Errorf("signature: %s", verifyDetail)
 				}
-			}()
-			ui.RunWithTUI(func() {
-				downloader.Execute(it.url, nil, conn, skiptls, proxy, bwLimit, timeout)
-				if verify {
-					verifyOK, verifyDetail = downloader.RunVerify(it.url, skiptls, proxy, timeout)
-					didVerify = true
-				}
-			}, conn, verify, i+1, len(items))
-		}()
+			}
+			return nil
+		})
+		cancelItem(nil) // release goroutine in WithCancelCause
 
 		if didVerify {
 			ui.PrintVerifySummary(verifyOK, verifyDetail)
-			if !verifyOK && itemOK {
-				itemOK = false
-				itemReason = verifyDetail
-			}
 		}
 
-		if itemOK {
+		// Classify the outcome.
+		switch {
+		case runErr == nil:
 			it.status = statusDone
-		} else {
+		case errors.Is(runErr, downloader.ErrSkipCurrent):
+			it.status = statusSkipped
+			it.reason = "user skipped"
+		case errors.Is(runErr, downloader.ErrAbortBatch):
+			it.status = statusAborted
+			it.reason = "user aborted"
+			// Mark all remaining as aborted and break.
+			for j := i + 1; j < len(items); j++ {
+				items[j].status = statusAborted
+			}
+			itemReason = ""
+			fmt.Println()
+			printQueuePanel(-1)
+			return
+		case errors.Is(runErr, context.Canceled):
+			it.status = statusAborted
+			it.reason = "cancelled"
+		default:
 			it.status = statusFailed
+			itemReason = runErr.Error()
 			it.reason = itemReason
 		}
 		fmt.Println()
+
+		// If the *parent* (batch) context got cancelled mid-item (external
+		// SIGINT), break out — don't start another download.
+		if ctx.Err() != nil {
+			for j := i + 1; j < len(items); j++ {
+				items[j].status = statusAborted
+			}
+			break
+		}
 	}
 
 	// ── Final summary panel ───────────────────────────────────────────────────
 	printQueuePanel(-1)
 
-	done, failed := 0, 0
+	done, failed, aborted := 0, 0, 0
 	for _, it := range items {
 		switch it.status {
 		case statusDone, statusSkipped:
 			done++
 		case statusFailed:
 			failed++
+		case statusAborted:
+			aborted++
 		}
 	}
-	_ = done
-	if failed == 0 {
+	switch {
+	case aborted > 0 && failed == 0:
+		fmt.Println(styleAbort.Render(fmt.Sprintf("  ⊘  Aborted — %d/%d completed.", done, len(items))))
+	case failed == 0:
 		fmt.Println(styleDone.Render(fmt.Sprintf("  ✓  All %d downloads complete.", len(items))))
-	} else {
-		fmt.Println(styleFail.Render(fmt.Sprintf("  ✗  %d/%d failed.", failed, len(items))))
+	default:
+		fmt.Println(styleFail.Render(fmt.Sprintf("  ✗  %d/%d failed%s.", failed, len(items),
+			func() string {
+				if aborted > 0 {
+					return fmt.Sprintf(", %d aborted", aborted)
+				}
+				return ""
+			}())))
 	}
 	fmt.Println()
 }

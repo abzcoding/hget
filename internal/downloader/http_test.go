@@ -257,9 +257,9 @@ func TestCopyContent(t *testing.T) {
 
 		dl := &HTTPDownloader{rate: 0}
 
-		done := make(chan bool)
-		go dl.copyContent(src, &dst, done)
-		<-done
+		if err := dl.copyContent(src, &dst); err != nil {
+			t.Fatalf("copyContent error: %v", err)
+		}
 
 		if dst.String() != testData {
 			t.Errorf("Expected content '%s', got '%s'", testData, dst.String())
@@ -272,11 +272,14 @@ func TestCopyContent(t *testing.T) {
 
 		dl := &HTTPDownloader{rate: 1024}
 
-		done := make(chan bool)
-		go dl.copyContent(src, &dst, done)
+		errCh := make(chan error, 1)
+		go func() { errCh <- dl.copyContent(src, &dst) }()
 
 		select {
-		case <-done:
+		case err := <-errCh:
+			if err != nil {
+				t.Fatalf("copyContent error: %v", err)
+			}
 		case <-time.After(2 * time.Second):
 			t.Fatalf("Copy with rate limit timed out")
 		}
@@ -296,9 +299,9 @@ func TestCopyContentWithSharedLimiter(t *testing.T) {
 		sharedLimiter: rate.NewLimiter(rate.Limit(1<<20), 1<<20),
 	}
 
-	done := make(chan bool)
-	go dl.copyContent(src, &dst, done)
-	<-done
+	if err := dl.copyContent(src, &dst); err != nil {
+		t.Fatalf("copyContent error: %v", err)
+	}
 
 	if dst.String() != testData {
 		t.Errorf("Expected content '%s', got '%s'", testData, dst.String())

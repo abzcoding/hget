@@ -423,16 +423,23 @@ func (d *HTTPDownloader) downloadPart(part state.Part, wg *sync.WaitGroup,
 		lastSent:  time.Now(),
 	}
 
-	finishDownloadChan := make(chan bool, 1)
-	go d.copyContent(resp.Body, pw, finishDownloadChan)
+	type copyResult struct{ err error }
+	finishDownloadChan := make(chan copyResult, 1)
+	go func() {
+		err := d.copyContent(resp.Body, pw)
+		finishDownloadChan <- copyResult{err: err}
+	}()
 
 	var interrupted bool
+	var copyErr error
 	select {
 	case <-ctx.Done():
 		interrupted = true
 		resp.Body.Close()
-		<-finishDownloadChan
-	case <-finishDownloadChan:
+		res := <-finishDownloadChan
+		copyErr = res.err
+	case res := <-finishDownloadChan:
+		copyErr = res.err
 	}
 
 	// Save state: RangeFrom is updated to "next byte to download from".
@@ -447,7 +454,12 @@ func (d *HTTPDownloader) downloadPart(part state.Part, wg *sync.WaitGroup,
 	stateSaveChan <- savedPart
 	fileChan <- part.Path
 
-	if !interrupted {
+	switch {
+	case interrupted:
+		// caller will save state if appropriate; do not signal done.
+	case copyErr != nil:
+		errorChan <- fmt.Errorf("part %d: %w", part.Index, copyErr)
+	default:
 		if ui.Program != nil {
 			ui.Program.Send(ui.PartDoneMsg{Index: int(part.Index)})
 		}
@@ -481,18 +493,23 @@ func (d *HTTPDownloader) buildRequestForPart(ctx context.Context, part state.Par
 	return req, nil
 }
 
-// copyContent copies data from the response to the writer with optional rate limiting.
-func (d *HTTPDownloader) copyContent(src io.Reader, dst io.Writer, done chan bool) {
-	defer func() { done <- true }()
-	if d.sharedLimiter != nil {
-		_, _ = io.Copy(dst, &rateLimitedReader{r: src, lim: d.sharedLimiter})
-	} else if d.rate != 0 {
+// copyContent copies data from the response to the writer with optional rate
+// limiting. It returns any io.Copy error so callers can detect truncated
+// transfers (e.g. dropped connections) instead of silently producing short
+// part files.
+func (d *HTTPDownloader) copyContent(src io.Reader, dst io.Writer) error {
+	var err error
+	switch {
+	case d.sharedLimiter != nil:
+		_, err = io.Copy(dst, &rateLimitedReader{r: src, lim: d.sharedLimiter})
+	case d.rate != 0:
 		reader := shapeio.NewReader(src)
 		reader.SetRateLimit(float64(d.rate))
-		_, _ = io.Copy(dst, reader)
-	} else {
-		_, _ = io.Copy(dst, src)
+		_, err = io.Copy(dst, reader)
+	default:
+		_, err = io.Copy(dst, src)
 	}
+	return err
 }
 
 // NewHTTPDownloaderFromState rebuilds an HTTPDownloader from a saved State,

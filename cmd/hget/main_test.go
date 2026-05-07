@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -11,7 +13,6 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
-	"syscall"
 	"testing"
 	"time"
 
@@ -21,8 +22,11 @@ import (
 	"github.com/abzcoding/hget/internal/util"
 )
 
-// Execute is re-exported here for backward compatibility with tests.
-var Execute = downloader.Execute
+// Execute is a backward-compat wrapper around downloader.Execute that uses a
+// background context, mirroring the pre-refactor signature used by tests.
+func Execute(url string, st *state.State, conn int, skiptls bool, proxy, bwLimit string, timeout time.Duration) {
+	_ = downloader.Execute(context.Background(), url, st, conn, skiptls, proxy, bwLimit, timeout)
+}
 
 func makeContent(size int) []byte {
 	data := make([]byte, size)
@@ -291,20 +295,21 @@ func TestE2EInterruptCancelsAndSavesState(t *testing.T) {
 	ts, _ := startTestServer(t, content, true, true, true, true, path)
 	url := ts.URL + path
 
-	doneSig := make(chan struct{})
+	ctx, cancel := context.WithCancelCause(context.Background())
 	go func() {
 		time.Sleep(200 * time.Millisecond)
-		_ = syscall.Kill(os.Getpid(), syscall.SIGINT)
-		close(doneSig)
+		cancel(downloader.ErrUserQuit)
 	}()
 
 	start := time.Now()
-	Execute(url, nil, 4, false, "", "50KB", 15*time.Second)
-	<-doneSig
+	err := downloader.Execute(ctx, url, nil, 4, false, "", "50KB", 15*time.Second)
 	dur := time.Since(start)
 
 	if dur > 10*time.Second {
 		t.Fatalf("interrupt handling too slow: %v", dur)
+	}
+	if !errors.Is(err, downloader.ErrUserQuit) && !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected ErrUserQuit/Canceled, got: %v", err)
 	}
 
 	usr, _ := user.Current()
@@ -334,5 +339,37 @@ func TestE2EInterruptCancelsAndSavesState(t *testing.T) {
 	}
 	if !foundPart {
 		t.Fatalf("expected part files in %s after interrupt", folder)
+	}
+}
+
+// TestE2ESkipDiscardsState verifies that cancelling Execute with
+// ErrSkipCurrent removes the partial download folder instead of saving state.
+func TestE2ESkipDiscardsState(t *testing.T) {
+	ui.DisplayProgress = false
+	restoreCwd := withTempCwd(t)
+	defer restoreCwd()
+	restoreDF := withTestDataFolder(t)
+	defer restoreDF()
+
+	content := makeContent(2 * 1024 * 1024)
+	path := "/skip.bin"
+	ts, _ := startTestServer(t, content, true, true, true, true, path)
+	url := ts.URL + path
+
+	ctx, cancel := context.WithCancelCause(context.Background())
+	go func() {
+		time.Sleep(150 * time.Millisecond)
+		cancel(downloader.ErrSkipCurrent)
+	}()
+
+	err := downloader.Execute(ctx, url, nil, 4, false, "", "50KB", 15*time.Second)
+	if !errors.Is(err, downloader.ErrSkipCurrent) {
+		t.Fatalf("expected ErrSkipCurrent, got: %v", err)
+	}
+
+	usr, _ := user.Current()
+	folder := filepath.Join(usr.HomeDir, state.DataFolder, util.TaskFromURL(url))
+	if _, err := os.Stat(folder); !os.IsNotExist(err) {
+		t.Fatalf("expected folder %s removed after skip, stat err=%v", folder, err)
 	}
 }
