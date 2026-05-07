@@ -10,15 +10,16 @@
 ## Features
 
 - **Parallel downloading** — splits files into chunks and downloads them simultaneously over multiple connections
-- **Live TUI** — animated progress bars per-part plus an overall bar, ETA, and per-connection speed readouts, driven by [Bubble Tea](https://github.com/charmbracelet/bubbletea), [Bubbles](https://github.com/charmbracelet/bubbles), and [Harmonica](https://github.com/charmbracelet/harmonica) spring physics
+- **Live "carrier" TUI** — refined phosphor-cyan / amber telemetry palette, per-part progress with status glyphs (`⬢ ◉ ◯`), animated overall bar, ETA, per-connection speed readouts, plus a rolling **speed-history sparkline** showing recent throughput trend and peak. Driven by [Bubble Tea](https://github.com/charmbracelet/bubbletea), [Bubbles](https://github.com/charmbracelet/bubbles), [Lip Gloss](https://github.com/charmbracelet/lipgloss), and [Harmonica](https://github.com/charmbracelet/harmonica) spring physics
+- **Real cancellation** — `q` / `Ctrl-C` actually stops the current download (state saved when resumable); `s` in batch mode skips the current item; `Ctrl-C` (or `q` in batch mode) aborts the entire queue. A live "stopping…/skipping…" overlay shows progress while state is drained safely
 - **Beautiful console logging** — colored, structured output via [charmbracelet/log](https://github.com/charmbracelet/log) when running non-interactively
 - **GPG signature verification** — pass `--verify` to automatically fetch the `.sig` file and verify it with GPG; result is shown inline in the TUI completion screen
 - **Smart re-download prompt** — if the target file already exists, a styled [Huh](https://github.com/charmbracelet/huh) confirmation form asks before overwriting
-- **Interrupt & resume** — hit Ctrl-C at any point; state is saved to `~/.hget/<task>/state.json` and can be resumed later
+- **Interrupt & resume** — `q` / `Ctrl-C` at any point persists byte offsets to `~/.hget/<task>/state.json`; resume later with `--resume`
 - **State reconstruction** — if the state file is missing, reconstructs progress from existing part files
 - **Bandwidth limiting** — cap aggregate download speed with `--rate` (e.g. `5MiB`, `500kB`)
 - **Proxy support** — HTTP and SOCKS5 proxies via `--proxy`
-- **Batch downloads** — supply a file of URLs (one per line) with `--file`
+- **Batch downloads** — supply a file of URLs (one per line) with `--file`; per-item skip + whole-batch abort, distinct `done / skipped / failed / aborted` accounting
 - **Server probing** — inspect `Accept-Ranges` and `Content-Length` without downloading via `--probe`
 - **TLS skip** — bypass certificate verification with `--skip-tls`
 

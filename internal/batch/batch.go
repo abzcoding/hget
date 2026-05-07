@@ -51,34 +51,34 @@ func RunBatchDownloads(ctx context.Context, filePath string, conn int, skiptls b
 		return
 	}
 
-	// ── Palette & styles (mirrors the TUI palette) ────────────────────────────
-	cPurple := lipgloss.Color("#C77DFF")
-	cCyan := lipgloss.Color("#00B4D8")
-	cGreen := lipgloss.Color("#06D6A0")
-	cYellow := lipgloss.Color("#FFB703")
-	cRed := lipgloss.Color("#EF233C")
-	cMuted := lipgloss.Color("#6C757D")
-	cBorder := lipgloss.Color("#495057")
+	// ── Palette & styles ("carrier" palette — mirrors the TUI) ───────────────
+	cPhosphor := lipgloss.Color("#73E0FF") // dominant cyan
+	cAmber := lipgloss.Color("#FFB75A")    // sharp accent
+	cMint := lipgloss.Color("#5EE6A1")     // success
+	cMagenta := lipgloss.Color("#FF5478")  // error
+	cSteel := lipgloss.Color("#5A6B85")    // chrome / labels
+	cSlate := lipgloss.Color("#3A475C")    // dim chrome
+	cFrost := lipgloss.Color("#E8F1F8")    // highlight
 
-	styleSep := lipgloss.NewStyle().Foreground(cBorder)
-	styleCounter := lipgloss.NewStyle().Foreground(cPurple).Bold(true)
-	styleFile := lipgloss.NewStyle().Foreground(cCyan)
-	styleURL := lipgloss.NewStyle().Foreground(cMuted)
-	styleDone := lipgloss.NewStyle().Foreground(cGreen).Bold(true)
-	styleFail := lipgloss.NewStyle().Foreground(cRed).Bold(true)
-	styleSkip := lipgloss.NewStyle().Foreground(cYellow)
-	styleAbort := lipgloss.NewStyle().Foreground(cYellow).Bold(true)
-	stylePending := lipgloss.NewStyle().Foreground(cMuted)
-	styleActive := lipgloss.NewStyle().Foreground(cCyan).Bold(true)
-	styleMuted := lipgloss.NewStyle().Foreground(cMuted)
+	styleSep := lipgloss.NewStyle().Foreground(cSlate)
+	styleCounter := lipgloss.NewStyle().Foreground(cAmber).Bold(true)
+	styleFile := lipgloss.NewStyle().Foreground(cFrost).Bold(true)
+	styleURL := lipgloss.NewStyle().Foreground(cSteel)
+	styleDone := lipgloss.NewStyle().Foreground(cMint).Bold(true)
+	styleFail := lipgloss.NewStyle().Foreground(cMagenta).Bold(true)
+	styleSkip := lipgloss.NewStyle().Foreground(cAmber)
+	styleAbort := lipgloss.NewStyle().Foreground(cAmber).Bold(true)
+	stylePending := lipgloss.NewStyle().Foreground(cSteel)
+	styleActive := lipgloss.NewStyle().Foreground(cPhosphor).Bold(true)
+	styleMuted := lipgloss.NewStyle().Foreground(cSteel)
 	styleBox := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(cPurple).
-		Padding(0, 2).
-		Foreground(cCyan)
+		Border(lipgloss.NormalBorder(), false, false, false, true).
+		BorderForeground(cAmber).
+		Padding(0, 0, 0, 2).
+		Foreground(cFrost)
 
 	const sepW = 68
-	sep := styleSep.Render(strings.Repeat("─", sepW))
+	sep := styleSep.Render(strings.Repeat("┄", sepW))
 
 	// ── Item status tracking ──────────────────────────────────────────────────
 	type itemStatus int
@@ -152,46 +152,72 @@ func RunBatchDownloads(ctx context.Context, filePath string, conn int, skiptls b
 		fmt.Println(styleBox.Render(hdr))
 		fmt.Println()
 
-		for i, it := range items {
-			var icon, nameStr, statusStr string
-			fname := it.file
-			if len(fname) > 40 {
-				fname = fname[:39] + "…"
+		// Fixed cell widths so every row aligns regardless of glyph width.
+		// Some Unicode glyphs (◯ U+25EF "LARGE CIRCLE", ◉ U+25C9 "FISHEYE")
+		// are East-Asian Ambiguous and render as 2 cells in most terminals;
+		// others (⬢ ⤳ ⊘ ◈) render as 1.  Width-aware lipgloss styles let
+		// every column line up on every row.
+		iconCol := lipgloss.NewStyle().Width(3) // 1-cell glyph + 1 pad → 3
+		nameCol := lipgloss.NewStyle().Width(40)
+
+		// Rune-safe truncation that respects Unicode display width.
+		truncName := func(s string) string {
+			if lipgloss.Width(s) <= 39 {
+				return s
 			}
+			out := make([]rune, 0, 40)
+			width := 0
+			for _, r := range s {
+				rw := lipgloss.Width(string(r))
+				if width+rw > 38 {
+					break
+				}
+				out = append(out, r)
+				width += rw
+			}
+			return string(out) + "…"
+		}
+
+		for i, it := range items {
+			var glyph, nameStr, statusStr string
+			fname := truncName(it.file)
 			switch it.status {
 			case statusDone:
-				icon = styleDone.Render("  ✓")
+				glyph = styleDone.Render("⬢")
 				nameStr = styleDone.Render(fname)
 				statusStr = styleDone.Render("done")
 			case statusFailed:
-				icon = styleFail.Render("  ✗")
+				glyph = styleFail.Render("◈")
 				nameStr = styleFail.Render(fname)
 				statusStr = styleFail.Render("failed")
 				if it.reason != "" {
 					statusStr += "  " + styleMuted.Render("("+truncateSummary(it.reason, 35)+")")
 				}
 			case statusSkipped:
-				icon = styleSkip.Render("  ─")
+				glyph = styleSkip.Render("⤳")
 				nameStr = styleSkip.Render(fname)
 				statusStr = styleSkip.Render("skipped")
 				if it.reason != "" {
 					statusStr += "  " + styleMuted.Render("("+truncateSummary(it.reason, 35)+")")
 				}
 			case statusAborted:
-				icon = styleAbort.Render("  ⊘")
+				glyph = styleAbort.Render("⊘")
 				nameStr = styleAbort.Render(fname)
 				statusStr = styleAbort.Render("aborted")
 			case statusActive:
-				icon = styleActive.Render("  ⬇")
+				glyph = styleActive.Render("◉")
 				nameStr = styleActive.Render(fname)
-				statusStr = styleActive.Render(fmt.Sprintf("downloading  [%d/%d]", i+1, len(items)))
+				statusStr = styleActive.Render(fmt.Sprintf("downloading  [%02d/%02d]", i+1, len(items)))
 			default:
-				icon = stylePending.Render("  ◦")
+				glyph = stylePending.Render("◯")
 				nameStr = stylePending.Render(fname)
-				statusStr = stylePending.Render("pending")
+				statusStr = stylePending.Render("queued")
 			}
-			padded := nameStr + strings.Repeat(" ", max(0, 42-len(fname)))
-			fmt.Printf("%s  %s  %s\n", icon, padded, statusStr)
+			fmt.Printf("  %s %s  %s\n",
+				iconCol.Render(glyph),
+				nameCol.Render(nameStr),
+				statusStr,
+			)
 		}
 		fmt.Println()
 		fmt.Println(sep)
@@ -217,10 +243,10 @@ func RunBatchDownloads(ctx context.Context, filePath string, conn int, skiptls b
 		var itemReason string
 
 		fmt.Printf("\n  %s  %s\n",
-			styleCounter.Render(fmt.Sprintf("[%d/%d]", i+1, len(items))),
+			styleCounter.Render(fmt.Sprintf("◉ %02d / %02d", i+1, len(items))),
 			styleFile.Render(it.file),
 		)
-		fmt.Println(styleURL.Render("  " + it.url))
+		fmt.Println(styleURL.Render("  ╰─ " + it.url))
 		fmt.Println()
 
 		// File-exists check (isatty gate is inside ui.ConfirmRedownload).
@@ -345,11 +371,11 @@ func RunBatchDownloads(ctx context.Context, filePath string, conn int, skiptls b
 	}
 	switch {
 	case aborted > 0 && failed == 0:
-		fmt.Println(styleAbort.Render(fmt.Sprintf("  ⊘  Aborted — %d/%d completed.", done, len(items))))
+		fmt.Println(styleAbort.Render(fmt.Sprintf("  ⊘  aborted — %d/%d completed", done, len(items))))
 	case failed == 0:
-		fmt.Println(styleDone.Render(fmt.Sprintf("  ✓  All %d downloads complete.", len(items))))
+		fmt.Println(styleDone.Render(fmt.Sprintf("  ⬢  all %d transfers complete", len(items))))
 	default:
-		fmt.Println(styleFail.Render(fmt.Sprintf("  ✗  %d/%d failed%s.", failed, len(items),
+		fmt.Println(styleFail.Render(fmt.Sprintf("  ◈  %d/%d failed%s", failed, len(items),
 			func() string {
 				if aborted > 0 {
 					return fmt.Sprintf(", %d aborted", aborted)

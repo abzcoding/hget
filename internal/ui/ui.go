@@ -25,16 +25,38 @@ import (
 var DisplayProgress = true
 
 // ── Colors ────────────────────────────────────────────────────────────────────
+//
+// "Carrier" palette — refined network telemetry.
+// One dominant data colour (phosphor cyan), one sharp accent (amber).
+// Success / error are the only places we use other hues, so they actually pop.
+//
+//	Dominant:  phosphor cyan       — data, totals, primary bars
+//	Accent:    amber               — active operations, ETA, in-flight speed
+//	Success:   mint                — completed states only
+//	Error:     hot magenta         — distinct from cliched ANSI red
+//	Chrome:    steel               — frames, separators, secondary labels
+//	Highlight: frost               — key values, banner
 
 var (
-	colorPurple = lipgloss.Color("#C77DFF")
-	colorCyan   = lipgloss.Color("#00B4D8")
-	colorGreen  = lipgloss.Color("#06D6A0")
-	colorYellow = lipgloss.Color("#FFB703")
-	colorRed    = lipgloss.Color("#EF233C")
-	colorMuted  = lipgloss.Color("#6C757D")
-	colorBorder = lipgloss.Color("#495057")
-	colorWhite  = lipgloss.Color("#F8F9FA")
+	colorPhosphor = lipgloss.Color("#73E0FF") // dominant cyan
+	colorAmber    = lipgloss.Color("#FFB75A") // sharp accent
+	colorMint     = lipgloss.Color("#5EE6A1") // success
+	colorMagenta  = lipgloss.Color("#FF5478") // error
+	colorSteel    = lipgloss.Color("#5A6B85") // chrome / labels
+	colorSlate    = lipgloss.Color("#3A475C") // dimmer chrome (separators)
+	colorFrost    = lipgloss.Color("#E8F1F8") // highlight values
+	colorDeepCyan = lipgloss.Color("#1E7A99") // bar gradient start
+
+	// Aliases preserved so existing references (banner, log icons, verify
+	// summary, batch styles) keep compiling without code churn.
+	colorPurple = colorPhosphor // banner / accent — repurposed to phosphor
+	colorCyan   = colorPhosphor
+	colorGreen  = colorMint
+	colorYellow = colorAmber
+	colorRed    = colorMagenta
+	colorMuted  = colorSteel
+	colorBorder = colorSlate
+	colorWhite  = colorFrost
 )
 
 // ── Styles ────────────────────────────────────────────────────────────────────
@@ -45,11 +67,13 @@ var (
 			Bold(true)
 
 	styleLabel = lipgloss.NewStyle().
-			Foreground(colorMuted).
-			Width(8)
+			Foreground(colorSteel).
+			Width(8).
+			MarginRight(1)
 
-	styleValue = lipgloss.NewStyle().Foreground(colorCyan)
-	styleSep   = lipgloss.NewStyle().Foreground(colorBorder)
+	styleValue = lipgloss.NewStyle().Foreground(colorFrost)
+	styleAccentValue = lipgloss.NewStyle().Foreground(colorPhosphor).Bold(true)
+	styleSep   = lipgloss.NewStyle().Foreground(colorSlate)
 
 	styleLogInfo  = lipgloss.NewStyle().Foreground(colorCyan)
 	styleLogWarn  = lipgloss.NewStyle().Foreground(colorYellow)
@@ -63,9 +87,40 @@ var (
 			Foreground(colorGreen).
 			Width(14)
 
-	styleHelp      = lipgloss.NewStyle().Foreground(colorMuted)
-	styleHelpKey   = lipgloss.NewStyle().Foreground(colorPurple).Bold(true)
-	styleDone      = lipgloss.NewStyle().Foreground(colorGreen).Bold(true)
+	styleHelp    = lipgloss.NewStyle().Foreground(colorMuted)
+	styleHelpKey = lipgloss.NewStyle().Foreground(colorPurple).Bold(true)
+	// keyCap renders a key as a small rounded "pill" — like a tiny
+	// keyboard cap.  It elevates footer affordances above plain bold text.
+	styleKeyCap = lipgloss.NewStyle().
+			Foreground(colorFrost).
+			Background(colorSlate).
+			Bold(true).
+			Padding(0, 1)
+	// sectionChip introduces named sections ("STREAMS", "TELEMETRY",
+	// "EVENTS") with a tiny tracked-out rounded label.  It anchors the
+	// hierarchy without consuming a full divider line.
+	styleSectionChip = lipgloss.NewStyle().
+				Foreground(colorPhosphor).
+				Bold(true).
+				Padding(0, 1).
+				Border(lipgloss.RoundedBorder(), false, false, false, false).
+				MarginRight(1)
+	// statusPill — soft background-tinted badge for per-part state.
+	stylePillDone = lipgloss.NewStyle().
+			Foreground(colorMint).
+			Background(lipgloss.Color("#0F2B22")).
+			Bold(true).
+			Padding(0, 1)
+	stylePillActive = lipgloss.NewStyle().
+			Foreground(colorAmber).
+			Background(lipgloss.Color("#2B1F0F")).
+			Bold(true).
+			Padding(0, 1)
+	stylePillIdle = lipgloss.NewStyle().
+			Foreground(colorSteel).
+			Background(lipgloss.Color("#1B2230")).
+			Padding(0, 1)
+	styleDone = lipgloss.NewStyle().Foreground(colorGreen).Bold(true)
 	styleETA       = lipgloss.NewStyle().Foreground(colorYellow)
 	styleError     = lipgloss.NewStyle().Foreground(colorRed).Bold(true)
 	styleVerifyOK  = lipgloss.NewStyle().Foreground(colorGreen).Bold(true)
@@ -89,12 +144,23 @@ var (
 			Bold(true)
 )
 
-const banner = `  ██╗  ██╗  ██████╗  ███████╗ ████████╗
-  ██║  ██║ ██╔════╝  ██╔════╝ ╚══██╔══╝
-  ███████║ ██║  ███╗ █████╗      ██║
-  ██╔══██║ ██║   ██║ ██╔══╝      ██║
-  ██║  ██║ ╚██████╔╝ ███████╗    ██║     fast multi-connection downloader
-  ╚═╝  ╚═╝  ╚═════╝  ╚══════╝   ╚═╝`
+// banner — refined "phosphor" wordmark. We commit to a single design
+// language: half-block letterforms that read like a CRT-rendered monogram.
+// The strapline beneath uses ▓▒░ shading to evoke a carrier signal fading
+// in/out of the spectrum.  Three lines (vs the previous six) gives every
+// terminal more vertical room for actual telemetry.
+const banner = `  █░█ █▀▀ █▀▀ ▀█▀
+  █▀█ █▄█ ██▄  █ `
+
+const bannerStrap = `  ░▒▓ carrier signal · multi-stream telemetry · resumable ▓▒░`
+
+// signalPulse — a custom spinner that mimics a carrier-wave amplitude meter.
+// Eight Braille frames sweep upward, then back down, evoking a continuous
+// signal pulse rather than the generic dots/lines from bubbles defaults.
+var signalPulse = spinner.Spinner{
+	Frames: []string{"⡀", "⡄", "⡆", "⡇", "⠇", "⠃", "⠁", "⠂"},
+	FPS:    time.Second / 12,
+}
 
 // ── Tea messages ──────────────────────────────────────────────────────────────
 
@@ -202,7 +268,6 @@ type tuiModel struct {
 	parts []partModel
 
 	// overall progress — spring-smoothed
-	overallBar    progress.Model
 	startTime     time.Time
 	totalDown     int64
 	overallSpring harmonica.Spring
@@ -221,6 +286,10 @@ type tuiModel struct {
 	// log panel
 	logs    []logEntry
 	maxLogs int
+
+	// rolling speed history for the total-bandwidth sparkline
+	speedHistory []float64
+	peakSpeed    float64
 
 	// batch context (0 = not in a batch)
 	batchCurrent int // 1-based index of this download in the batch
@@ -252,6 +321,11 @@ type tuiModel struct {
 	// spinner (pre-start and verify)
 	spinner spinner.Model
 
+	// link — animated data-link / modem panel rendered as the centrepiece
+	// of the download view; absorbs per-channel rows + aggregate bar so
+	// nothing is duplicated below.
+	link dataLink
+
 	// terminal width
 	width int
 }
@@ -265,8 +339,8 @@ var Program *tea.Program
 // 's'.  onQuit is invoked on 'q' / 'ctrl+c'; both default to no-ops if nil.
 func NewTUIModel(numConns int, willVerify bool, batchCurrent, batchTotal int, onSkip, onQuit func()) tuiModel {
 	s := spinner.New()
-	s.Spinner = spinner.Points
-	s.Style = lipgloss.NewStyle().Foreground(colorPurple)
+	s.Spinner = signalPulse
+	s.Style = lipgloss.NewStyle().Foreground(colorAmber)
 	return tuiModel{
 		numConns:      numConns,
 		maxLogs:       5,
@@ -279,8 +353,16 @@ func NewTUIModel(numConns int, willVerify bool, batchCurrent, batchTotal int, on
 		joinSpring:    harmonica.NewSpring(harmonica.FPS(60), 7.0, 0.85),
 		onSkip:        onSkip,
 		onQuit:        onQuit,
+		speedHistory:  make([]float64, 0, sparklineWidth),
+		link:          newDataLink(),
 	}
 }
+
+// Sparkline configuration — a rolling history of total download speed
+// rendered with Unicode block-shading characters for sub-line resolution.
+const sparklineWidth = 48
+
+var sparklineRunes = []rune{' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'}
 
 func (m tuiModel) Init() tea.Cmd {
 	return tea.Batch(m.spinner.Tick, tickCmd())
@@ -303,7 +385,6 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.parts[i].bar = newPartBar(bw)
 		}
 		if m.started {
-			m.overallBar = newOverallBar(bw)
 		}
 		if m.joining {
 			m.joinBar = newJoinBar(bw)
@@ -384,6 +465,30 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.overallPct = 0
 		}
 
+		// Sample the total speed for the sparkline.  We sample on every tick
+		// (16ms) but downsample to ~6 Hz so the sparkline reads as a smooth
+		// recent-history graph rather than per-frame jitter.
+		var totalSpeed float64
+		for _, p := range m.parts {
+			totalSpeed += p.speed
+		}
+		if totalSpeed > m.peakSpeed {
+			m.peakSpeed = totalSpeed
+		}
+
+		// Drive the data-link LED animation from current per-channel rates.
+		partSpeeds := make([]float64, len(m.parts))
+		for i, p := range m.parts {
+			partSpeeds[i] = p.speed
+		}
+		m.link.Tick(totalSpeed, m.peakSpeed, partSpeeds)
+		if len(m.speedHistory) == 0 || time.Since(m.startTime).Milliseconds()%160 < 20 {
+			m.speedHistory = append(m.speedHistory, totalSpeed)
+			if len(m.speedHistory) > sparklineWidth {
+				m.speedHistory = m.speedHistory[len(m.speedHistory)-sparklineWidth:]
+			}
+		}
+
 		// Join spring.
 		joinTarget := 0.0
 		if m.joinTotal > 0 {
@@ -412,7 +517,6 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				spring:   harmonica.NewSpring(harmonica.FPS(60), 7.0, 0.85),
 			}
 		}
-		m.overallBar = newOverallBar(bw)
 		return m, nil
 
 	case PartProgressMsg:
@@ -504,24 +608,18 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // ── Bar constructors ──────────────────────────────────────────────────────────
 
 func newPartBar(w int) progress.Model {
+	// Per-part: fades from deep cyan to phosphor — single-hue, refined.
 	return progress.New(
-		progress.WithGradient("#7B2FBE", "#00B4D8"),
-		progress.WithWidth(w),
-		progress.WithoutPercentage(),
-	)
-}
-
-func newOverallBar(w int) progress.Model {
-	return progress.New(
-		progress.WithGradient("#C77DFF", "#06D6A0"),
+		progress.WithGradient("#1E7A99", "#73E0FF"),
 		progress.WithWidth(w),
 		progress.WithoutPercentage(),
 	)
 }
 
 func newJoinBar(w int) progress.Model {
+	// Join: amber → mint, signalling "almost finished".
 	return progress.New(
-		progress.WithGradient("#FFB703", "#06D6A0"),
+		progress.WithGradient("#FFB75A", "#5EE6A1"),
 		progress.WithWidth(w),
 		progress.WithoutPercentage(),
 	)
@@ -554,27 +652,44 @@ func (m tuiModel) View() string {
 	if w == 0 {
 		w = 80
 	}
-	sep := styleSep.Render(strings.Repeat("─", sepWidth(w)))
+	// Soft body separator using a fine dotted glyph instead of the heavy
+	// horizontal line, plus an accent rule under the banner.
+	sep := styleSep.Render(strings.Repeat("┄", sepWidth(w)))
+	accentRule := lipgloss.NewStyle().Foreground(colorPhosphor).Render(strings.Repeat("═", sepWidth(w)))
 
-	b.WriteString(styleBanner.Render(banner))
-	b.WriteString("\n\n")
+	// Header — during the active download phase, render the animated
+	// data-link panel (which absorbs per-channel + aggregate readouts).
+	// Otherwise fall back to the wordmark banner.
+	useLink := m.started && !m.done && !m.hasError && !m.joining && w >= dataLinkInnerW+4
+	if !useLink {
+		b.WriteString(styleBanner.Render(banner))
+		b.WriteString("\n")
+		b.WriteString(lipgloss.NewStyle().Foreground(colorSteel).Render(bannerStrap))
+		b.WriteString("\n")
+		b.WriteString(accentRule)
+		b.WriteString("\n\n")
+	}
 
 	// Batch progress indicator.
 	if m.batchTotal > 1 {
 		doneSoFar := m.batchCurrent - 1
 		remaining := m.batchTotal - m.batchCurrent
-		batchLine := fmt.Sprintf("  File %d of %d", m.batchCurrent, m.batchTotal)
+		idx := lipgloss.NewStyle().Foreground(colorAmber).Bold(true).
+			Render(fmt.Sprintf("%02d", m.batchCurrent))
+		of := lipgloss.NewStyle().Foreground(colorSteel).
+			Render(fmt.Sprintf(" / %02d", m.batchTotal))
+		batchLine := "  ⌘  batch " + idx + of
 		if doneSoFar > 0 {
-			batchLine += fmt.Sprintf("  ·  %s", styleDone.Render(fmt.Sprintf("%d done", doneSoFar)))
+			batchLine += "  " + styleSep.Render("│") + "  " + styleDone.Render(fmt.Sprintf("%d done", doneSoFar))
 		}
 		if remaining > 0 {
-			batchLine += fmt.Sprintf("  ·  %s", styleValue.Render(fmt.Sprintf("%d left", remaining)))
+			batchLine += "  " + styleSep.Render("│") + "  " + lipgloss.NewStyle().Foreground(colorPhosphor).Render(fmt.Sprintf("%d queued", remaining))
 		}
 		b.WriteString(lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(colorPurple).
-			Padding(0, 1).
-			Foreground(colorMuted).
+			Border(lipgloss.NormalBorder(), false, false, false, true).
+			BorderForeground(colorAmber).
+			Padding(0, 0, 0, 1).
+			Foreground(colorFrost).
 			Render(batchLine) + "\n\n")
 	}
 
@@ -591,46 +706,106 @@ func (m tuiModel) View() string {
 
 	// Error screen.
 	if m.hasError {
-		b.WriteString("  " + styleError.Render("✗  Download failed") + "\n\n")
+		// Build channel state at error point
+		channels := make([]channelRow, len(m.parts))
+		for i, p := range m.parts {
+			pct := 0.0
+			if p.total > 0 {
+				pct = float64(p.downloaded) / float64(p.total)
+			}
+			channels[i] = channelRow{
+				Index:      i + 1,
+				Pct:        pct,
+				RawPct:     pct,
+				Speed:      0,
+				Done:       false,
+				HasStarted: p.downloaded > 0,
+			}
+		}
+		
+		linkView := m.link.View(channels, m.totalDown, m.size, m.peakSpeed,
+			time.Since(m.startTime), "ERROR", false)
+		// Centre the panel
+		pad := (w - dataLinkInnerW - 2) / 2
+		if pad < 0 {
+			pad = 0
+		}
+		padStr := strings.Repeat(" ", pad)
+		for _, line := range strings.Split(linkView, "\n") {
+			b.WriteString(padStr + line + "\n")
+		}
+		
+		b.WriteString("\n")
+		b.WriteString("  " + styleError.Render("◆ LINK FAILED") + "\n\n")
 		b.WriteString("  " + styleErrBox.Render(m.errMsg) + "\n\n")
 		b.WriteString(sep + "\n")
 		b.WriteString(styleHelp.Render("  closing in 3 s  •  ") + styleHelpKey.Render("q") + styleHelp.Render(" quit now"))
 		return b.String()
 	}
 
-	// Metadata row.
+	// Metadata row.  Slim, refined typographic hierarchy:
+	// dim label · accent value · monospace muted secondary.
 	urlDisplay := m.url
 	if maxU := w - 14; len(urlDisplay) > maxU && maxU > 4 {
 		urlDisplay = urlDisplay[:maxU-1] + "…"
 	}
-	b.WriteString(styleLabel.Render("  URL") + "   " + styleValue.Render(urlDisplay) + "\n")
-	b.WriteString(styleLabel.Render("  File") + "  " + styleValue.Render(m.fileName) + "\n")
-	b.WriteString(styleLabel.Render("  Size") + "  " + styleValue.Render(formatBytes(m.size)) + "\n")
-	b.WriteString(styleLabel.Render("  Conns") + " " + styleValue.Render(fmt.Sprintf("%d", m.numConns)) + "\n")
+	tri := lipgloss.NewStyle().Foreground(colorAmber).Render("▸")
+	b.WriteString("  " + tri + " " + styleLabel.Render("url") + " " + styleValue.Render(urlDisplay) + "\n")
+	b.WriteString("    " + styleLabel.Render("file") + " " + styleAccentValue.Render(m.fileName) + "\n")
+	b.WriteString("    " + styleLabel.Render("size") + " " + styleAccentValue.Render(formatBytes(m.size)) + "\n")
+	b.WriteString("    " + styleLabel.Render("conns") + " " + styleAccentValue.Render(fmt.Sprintf("%d", m.numConns)) + "\n")
 	if len(m.ips) > 0 {
-		b.WriteString(styleLabel.Render("  IPs") + "   " + styleValue.Render(strings.Join(m.ips, " · ")) + "\n")
+		b.WriteString("    " + styleLabel.Render("ips") + " " + styleValue.Render(strings.Join(m.ips, " · ")) + "\n")
 	}
 	b.WriteString("\n" + sep + "\n\n")
 
 	// Completion screen.
 	if m.done && !m.joining {
+		// Build final channel state (all at 100%)
+		channels := make([]channelRow, len(m.parts))
+		for i := range m.parts {
+			channels[i] = channelRow{
+				Index:      i + 1,
+				Pct:        1.0,
+				RawPct:     1.0,
+				Speed:      0,
+				Done:       true,
+				HasStarted: true,
+			}
+		}
+		
+		linkView := m.link.View(channels, m.size, m.size, m.peakSpeed,
+			time.Since(m.startTime), "COMPLETE", true)
+		// Centre the panel
+		pad := (w - dataLinkInnerW - 2) / 2
+		if pad < 0 {
+			pad = 0
+		}
+		padStr := strings.Repeat(" ", pad)
+		for _, line := range strings.Split(linkView, "\n") {
+			b.WriteString(padStr + line + "\n")
+		}
+		
+		b.WriteString("\n")
+		
 		elapsed := time.Since(m.startTime)
 		var avg float64
 		if s := elapsed.Seconds(); s > 0 {
 			avg = float64(m.size) / s
 		}
-		b.WriteString("  " + styleDone.Render("✓  Download complete!") + "\n\n")
-		b.WriteString(styleLabel.Render("  Time") + "   " + styleValue.Render(formatDuration(elapsed)) + "\n")
-		b.WriteString(styleLabel.Render("  Avg") + "    " + styleValue.Render(formatSpeed(avg)) + "\n")
-		b.WriteString(styleLabel.Render("  Saved") + "  " + styleValue.Render(m.fileName) + "\n")
+		b.WriteString("  " + styleDone.Render("◆ LINK CLOSED") + "\n\n")
+		b.WriteString("    " + styleLabel.Render("time") + " " + styleAccentValue.Render(formatDuration(elapsed)) + "\n")
+		b.WriteString("    " + styleLabel.Render("avg") + " " + styleAccentValue.Render(formatSpeed(avg)) + "\n")
+		b.WriteString("    " + styleLabel.Render("peak") + " " + styleAccentValue.Render(formatSpeed(m.peakSpeed)) + "\n")
+		b.WriteString("    " + styleLabel.Render("saved") + " " + styleValue.Render(m.fileName) + "\n")
 		// Verification result row.
 		if m.willVerify {
-			b.WriteString(styleLabel.Render("  Sig") + "    ")
+			b.WriteString("    " + styleLabel.Render("sig") + " ")
 			if m.verifyDone {
 				if m.verifyOK {
-					b.WriteString(styleVerifyOK.Render("✓ Valid") + "\n")
+					b.WriteString(styleVerifyOK.Render("⬢ valid") + "\n")
 				} else {
-					b.WriteString(styleVerifyBad.Render("✗ Invalid") + "\n")
+					b.WriteString(styleVerifyBad.Render("◈ invalid") + "\n")
 					if m.verifyDetail != "" {
 						lines := strings.SplitN(strings.TrimSpace(m.verifyDetail), "\n", 3)
 						for _, l := range lines {
@@ -639,7 +814,7 @@ func (m tuiModel) View() string {
 					}
 				}
 			} else {
-				b.WriteString(m.spinner.View() + "  Verifying…\n")
+				b.WriteString(m.spinner.View() + "  verifying…\n")
 			}
 		}
 		b.WriteString("\n" + sep + "\n")
@@ -666,9 +841,9 @@ func (m tuiModel) View() string {
 		b.WriteString(fmt.Sprintf("  %5.1f%%\n", pct*100))
 		b.WriteString("\n" + sep + "\n")
 	} else {
-		// Per-part rows.
+		// Build per-channel rows for the data-link panel.
+		channels := make([]channelRow, len(m.parts))
 		for i, p := range m.parts {
-			pct := math.Max(0, math.Min(p.smoothPct, 1.0))
 			rawPct := 0.0
 			if p.total > 0 {
 				rawPct = math.Min(float64(p.downloaded)/float64(p.total), 1.0)
@@ -676,51 +851,59 @@ func (m tuiModel) View() string {
 			if p.done {
 				rawPct = 1.0
 			}
-			label := fmt.Sprintf("#%d", i+1)
-			b.WriteString("  " + stylePartLabel.Render(label) + " ")
-			b.WriteString(p.bar.ViewAs(pct))
-			b.WriteString(fmt.Sprintf("  %5.1f%%", rawPct*100))
-			if p.done {
-				b.WriteString("  " + styleDone.Render("✓"))
-			} else {
-				b.WriteString("  " + styleSpeed.Render(formatSpeed(p.speed)))
+			channels[i] = channelRow{
+				Index:      i,
+				Pct:        math.Max(0, math.Min(p.smoothPct, 1.0)),
+				RawPct:     rawPct,
+				Speed:      p.speed,
+				Done:       p.done,
+				HasStarted: p.downloaded > 0,
 			}
-			b.WriteString("\n")
 		}
 
-		// Overall bar.
-		if m.size > 0 {
-			b.WriteString("\n" + sep + "\n\n")
-			pct := math.Max(0, math.Min(m.overallPct, 1.0))
-			rawPct := math.Min(float64(m.totalDown)/float64(m.size), 1.0)
+		// Compose link status word from lifecycle state.
+		status := "downloading"
+		online := true
+		switch {
+		case m.stopping:
+			status = "STOPPING"
+			online = false
+		case m.skipping:
+			status = "SKIPPING"
+			online = false
+		case m.verifying:
+			status = "DOWNLOADING"
+		case m.totalDown == 0:
+			status = "HANDSHAKE"
+			online = false
+		default:
+			status = "DOWNLOADING"
+		}
 
-			// Total download speed.
-			var totalSpeed float64
-			for _, p := range m.parts {
-				totalSpeed += p.speed
-			}
+		linkView := m.link.View(channels, m.totalDown, m.size, m.peakSpeed,
+			time.Since(m.startTime), status, online)
+		// Centre the panel in the terminal.
+		pad := (w - dataLinkInnerW - 2) / 2
+		if pad < 0 {
+			pad = 0
+		}
+		padStr := strings.Repeat(" ", pad)
+		for _, line := range strings.Split(linkView, "\n") {
+			b.WriteString(padStr + line + "\n")
+		}
 
-			b.WriteString("  " + stylePartLabel.Render("Total") + " ")
-			b.WriteString(m.overallBar.ViewAs(pct))
-			b.WriteString(fmt.Sprintf("  %5.1f%%", rawPct*100))
-
-			if rawPct > 0.001 {
-				elapsed := time.Since(m.startTime).Seconds()
-				eta := elapsed/rawPct - elapsed
-				if eta > 0 {
-					b.WriteString("  ETA " + styleETA.Render(formatDuration(time.Duration(eta*float64(time.Second)))))
-				}
-				if totalSpeed > 0 {
-					b.WriteString("  " + styleSpeed.Render(formatSpeed(totalSpeed)))
-				}
-			}
-			b.WriteString("\n")
+		// Sparkline beneath the link panel — recent throughput history.
+		if spark := m.renderSparkline(); spark != "" {
+			peakLabel := lipgloss.NewStyle().Foreground(colorSteel).Render("peak " + formatBytes(int64(m.peakSpeed)) + "/s")
+			rateLabel := lipgloss.NewStyle().Foreground(colorSteel).Render("rate ↗ ")
+			b.WriteString("\n" + padStr + "  " + rateLabel + spark + "  " + peakLabel + "\n")
 		}
 	}
 
 	// Log panel.
 	if len(m.logs) > 0 {
-		b.WriteString("\n" + sep + "\n")
+		b.WriteString("\n  " + styleSectionChip.Render("EVENTS") +
+			styleSep.Render(strings.Repeat("┄", maxInt(0, sepWidth(w)-11))) + "\n")
 		for _, l := range m.logs {
 			icon, st := logIconStyle(l.level)
 			b.WriteString("  " + st.Render(icon+" "+truncate(l.text, w-6)) + "\n")
@@ -739,6 +922,35 @@ func (m tuiModel) View() string {
 	return b.String()
 }
 
+// renderSparkline turns the rolling speed history into a left-padded sparkline
+// of constant width.  The bars are coloured phosphor cyan, with the most-recent
+// (rightmost) bar amber to highlight current activity.
+func (m tuiModel) renderSparkline() string {
+	if len(m.speedHistory) == 0 || m.peakSpeed == 0 {
+		return ""
+	}
+	max := m.peakSpeed
+	out := make([]rune, 0, sparklineWidth)
+	// Pad with empty cells when history is shorter than the spark width.
+	pad := sparklineWidth - len(m.speedHistory)
+	for i := 0; i < pad; i++ {
+		out = append(out, ' ')
+	}
+	for _, v := range m.speedHistory {
+		idx := int(v / max * float64(len(sparklineRunes)-1))
+		if idx < 0 {
+			idx = 0
+		}
+		if idx >= len(sparklineRunes) {
+			idx = len(sparklineRunes) - 1
+		}
+		out = append(out, sparklineRunes[idx])
+	}
+	body := lipgloss.NewStyle().Foreground(colorPhosphor).Render(string(out[:len(out)-1]))
+	tip := lipgloss.NewStyle().Foreground(colorAmber).Bold(true).Render(string(out[len(out)-1]))
+	return body + tip
+}
+
 // renderStopOverlay produces the yellow/cyan boxed "stopping…" / "skipping…"
 // banner shown while the worker goroutine is still draining.  It mirrors the
 // styling of the verify completion box so the UI feels consistent.
@@ -755,20 +967,28 @@ func (m tuiModel) renderStopOverlay() string {
 	return styleStopBox.Render(text)
 }
 
-// renderFooter renders the bottom help bar.  Keys are colored differently from
-// their descriptions so the available actions read at a glance.
+// renderFooter renders the bottom help bar.  Keys are rendered as small
+// rounded "key cap" pills so available actions read at a glance.
 func (m tuiModel) renderFooter() string {
 	var parts []string
 	if m.stopping {
-		parts = append(parts, styleHelp.Render("press ")+styleHelpKey.Render("q")+styleHelp.Render(" again to force-quit"))
+		parts = append(parts, styleHelp.Render("press ")+styleKeyCap.Render("q")+styleHelp.Render(" again to force-quit"))
 	} else {
 		if m.onSkip != nil {
-			parts = append(parts, styleHelpKey.Render("s")+styleHelp.Render(" skip item"))
+			parts = append(parts, styleKeyCap.Render("s")+" "+styleHelp.Render("skip item"))
 		}
-		parts = append(parts, styleHelpKey.Render("q")+styleHelp.Render(" stop & save"))
-		parts = append(parts, styleHelpKey.Render("ctrl+c")+styleHelp.Render(" abort"))
+		parts = append(parts, styleKeyCap.Render("q")+" "+styleHelp.Render("stop & save"))
+		parts = append(parts, styleKeyCap.Render("⌃C")+" "+styleHelp.Render("abort"))
 	}
-	return "  " + strings.Join(parts, styleHelp.Render("  •  "))
+	return "  " + strings.Join(parts, styleHelp.Render("   "))
+}
+
+// maxInt returns the larger of a, b.  Tiny helper for sep-width math.
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func logIconStyle(level string) (string, lipgloss.Style) {
@@ -1045,6 +1265,35 @@ func RunWithTUI(opts RunOptions, fn func() error) error {
 	return fn()
 }
 
+// carrierTheme returns a huh theme that matches the TUI's "carrier" palette
+// (phosphor cyan + amber on a dark steel ground).  Centralising the theme keeps
+// every interactive prompt visually consistent with the live TUI.
+func carrierTheme() *huh.Theme {
+	t := huh.ThemeBase()
+	t.Focused.Title = t.Focused.Title.Foreground(colorPhosphor).Bold(true)
+	t.Focused.Description = t.Focused.Description.Foreground(colorSteel)
+	t.Focused.SelectedOption = t.Focused.SelectedOption.Foreground(colorAmber).Bold(true)
+	t.Focused.UnselectedOption = t.Focused.UnselectedOption.Foreground(colorFrost)
+	t.Focused.FocusedButton = t.Focused.FocusedButton.
+		Foreground(colorFrost).
+		Background(colorDeepCyan).
+		Bold(true).
+		Padding(0, 2)
+	t.Focused.BlurredButton = t.Focused.BlurredButton.
+		Foreground(colorSteel).
+		Background(colorSlate).
+		Padding(0, 2)
+	t.Focused.Base = t.Focused.Base.
+		BorderStyle(lipgloss.RoundedBorder()).
+		BorderForeground(colorPhosphor).
+		PaddingLeft(1)
+	t.Blurred.Base = t.Blurred.Base.
+		BorderStyle(lipgloss.RoundedBorder()).
+		BorderForeground(colorSlate).
+		PaddingLeft(1)
+	return t
+}
+
 // ConfirmRedownload shows a styled huh confirmation prompt asking whether to
 // overwrite an existing file.  Returns true when the user says yes (or when
 // stdout is not a terminal, in which case the download proceeds silently).
@@ -1052,23 +1301,25 @@ func ConfirmRedownload(filename string) bool {
 	if !isatty.IsTerminal(os.Stdout.Fd()) {
 		return true
 	}
-	labelStyle := lipgloss.NewStyle().Foreground(colorPurple).Bold(true)
-	fileStyle := lipgloss.NewStyle().Foreground(colorCyan)
+	labelStyle := lipgloss.NewStyle().Foreground(colorAmber).Bold(true)
+	fileStyle := lipgloss.NewStyle().Foreground(colorPhosphor).Bold(true)
 
 	fmt.Println()
-	fmt.Println(labelStyle.Render("  ⚠  File already exists:") + " " + fileStyle.Render(filename))
+	fmt.Println(labelStyle.Render("  ⚠  file already on disk") + " " +
+		styleSep.Render("│") + " " + fileStyle.Render(filename))
 	fmt.Println()
 
 	var proceed bool
 	f := huh.NewForm(
 		huh.NewGroup(
 			huh.NewConfirm().
-				Title("Download again and overwrite?").
+				Title("Overwrite and re-download?").
+				Description("The existing file will be replaced.").
 				Value(&proceed).
-				Affirmative("Yes, overwrite").
-				Negative("No, keep existing"),
+				Affirmative("overwrite").
+				Negative("keep existing"),
 		),
-	)
+	).WithTheme(carrierTheme())
 	_ = f.Run()
 	return proceed
 }
@@ -1077,10 +1328,12 @@ func ConfirmRedownload(filename string) bool {
 func PrintHelp() {
 	// ── Banner ────────────────────────────────────────────────────────────────
 	fmt.Fprintln(Stdout, styleBanner.Render(banner))
+	fmt.Fprintln(Stdout, lipgloss.NewStyle().Foreground(colorSteel).Render(bannerStrap))
+	fmt.Fprintln(Stdout, lipgloss.NewStyle().Foreground(colorPhosphor).Render(strings.Repeat("═", 68)))
 	fmt.Fprintln(Stdout)
 
 	w := 68 // fixed help width
-	sep := styleSep.Render(strings.Repeat("─", w))
+	sep := styleSep.Render(strings.Repeat("┄", w))
 
 	// ── Shared style helpers ──────────────────────────────────────────────────
 	sectionHeader := lipgloss.NewStyle().
