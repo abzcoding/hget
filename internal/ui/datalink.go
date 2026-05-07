@@ -1,18 +1,5 @@
 package ui
 
-// datalink.go — vintage rack-mount data-link / modem visualisation.
-//
-// A dial-up modem with blinking status LEDs is the iconic physical
-// artefact of "downloading" — the way a cassette is for music playback.
-// The panel maps directly onto an HTTP downloader:
-//
-//   • PWR / CD / TX / RX / OH / AA   — status LEDs flicker with activity
-//   • per-channel rows               — one per parallel connection
-//   • aggregate signal bar           — total throughput meter
-//
-// The whole download view collapses into this single panel: no duplicated
-// per-part rows, no separate overall bar — every piece of telemetry has
-// one canonical home.
 
 import (
 	cryptorand "crypto/rand"
@@ -28,9 +15,6 @@ import (
 
 // ── LEDs ──────────────────────────────────────────────────────────────────────
 
-// led models a single front-panel indicator with a brightness that decays
-// over time.  Activity "ignites" the LED, then it fades — exactly like a
-// real LED with a phosphor afterglow.
 type led struct {
 	brightness float64
 	pulse      float64
@@ -82,7 +66,7 @@ func newDataLink() dataLink {
 	} else {
 		seed = time.Now().UnixNano()
 	}
-	
+
 	return dataLink{
 		pwr: led{brightness: 1},
 		cd:  led{brightness: 1},
@@ -93,9 +77,10 @@ func newDataLink() dataLink {
 }
 
 // Tick advances the LED animation.
-//   totalSpeed  bytes/s — drives RX brightness
-//   peak        bytes/s — normalisation reference
-//   partSpeeds  per-channel bytes/s — drives per-channel activity LEDs
+//
+//	totalSpeed  bytes/s — drives RX brightness
+//	peak        bytes/s — normalisation reference
+//	partSpeeds  per-channel bytes/s — drives per-channel activity LEDs
 func (d *dataLink) Tick(totalSpeed, peak float64, partSpeeds []float64) {
 	d.ticks++
 
@@ -149,7 +134,7 @@ func (d *dataLink) Tick(totalSpeed, peak float64, partSpeeds []float64) {
 // ── geometry ──────────────────────────────────────────────────────────────────
 
 const (
-	dataLinkInnerW = 70
+	dataLinkInnerW  = 70
 	channelBarCells = 22
 	aggBarCells     = 30
 )
@@ -168,13 +153,13 @@ type channelRow struct {
 
 // View renders the full data-link panel.
 //
-//   channels   — per-connection rows
-//   totalDown  — aggregate bytes transferred
-//   size       — total bytes (0 if unknown)
-//   peak       — peak observed total speed (for ETA / peak readout)
-//   elapsed    — duration since transfer started
-//   status     — short status word ("downloading" / "stopping" / …)
-//   carrier    — true when the link is "up" (drives header colour)
+//	channels   — per-connection rows
+//	totalDown  — aggregate bytes transferred
+//	size       — total bytes (0 if unknown)
+//	peak       — peak observed total speed (for ETA / peak readout)
+//	elapsed    — duration since transfer started
+//	status     — short status word ("downloading" / "stopping" / …)
+//	carrier    — true when the link is "up" (drives header colour)
 func (d *dataLink) View(
 	channels []channelRow,
 	totalDown, size int64,
@@ -190,7 +175,7 @@ func (d *dataLink) View(
 	// Status-specific LED patterns and colors
 	var statusColor lipgloss.Color
 	var pwrOn, cdOn, txOn, rxOn, ohOn, aaOn bool
-	
+
 	switch status {
 	case "HANDSHAKE":
 		statusColor = colorCyan
@@ -228,7 +213,7 @@ func (d *dataLink) View(
 		statusColor = colorPhosphor
 		pwrOn = true
 	}
-	
+
 	// Override LED brightness based on state flags
 	if pwrOn {
 		d.pwr.ignite(1.0)
@@ -260,7 +245,7 @@ func (d *dataLink) View(
 	} else {
 		d.aa.brightness = 0.3
 	}
-	
+
 	if !carrier && status != "COMPLETE" && status != "ERROR" {
 		statusColor = colorPhosphor
 	}
@@ -349,7 +334,7 @@ func (d *dataLink) View(
 
 // renderChannelRow renders a single per-connection line:
 //
-//   ▸ CH·01  ┃▰▰▰▰▰▰▰▰▰▰▰▱▱▱▱▱▱▱▱▱▱▱┃   72.3%    ↓ 1.2 MB/s   ●●
+//	▸ CH·01  ┃▰▰▰▰▰▰▰▰▰▰▰▱▱▱▱▱▱▱▱▱▱▱┃   72.3%    ↓ 1.2 MB/s   ●●
 func (d *dataLink) renderChannelRow(ch channelRow, idx int, status string) string {
 	bullet := lipgloss.NewStyle().Foreground(colorAmber).Render("▸")
 	label := lipgloss.NewStyle().Foreground(colorSteel).Render(fmt.Sprintf("CH·%02d", ch.Index+1))
@@ -388,7 +373,7 @@ func (d *dataLink) renderChannelRow(ch channelRow, idx int, status string) strin
 	} else if status == "ERROR" {
 		ledColor = colorMagenta
 	}
-	
+
 	if idx < len(d.chanLEDs) {
 		act = d.chanLEDs[idx][0].render(ledColor, colorSlate) +
 			d.chanLEDs[idx][1].render(ledColor, colorSlate)
@@ -405,8 +390,8 @@ func (d *dataLink) renderChannelRow(ch channelRow, idx int, status string) strin
 
 // renderAggregate renders the total / aggregate readout (3 lines):
 //
-//   ◆ LINK    ┃▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▱▱┃   73.8%
-//             ↓ 4.8 MB/s   ETA 02:14   peak 6.2 MB/s
+//	◆ LINK    ┃▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▱▱┃   73.8%
+//	          ↓ 4.8 MB/s   ETA 02:14   peak 6.2 MB/s
 func (d *dataLink) renderAggregate(totalDown, size int64, peak float64, elapsed time.Duration) []string {
 	pct := 0.0
 	if size > 0 {

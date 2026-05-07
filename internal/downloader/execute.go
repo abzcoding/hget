@@ -30,16 +30,6 @@ var (
 	ErrUserQuit = errors.New("user quit")
 )
 
-// Execute downloads url, observing ctx for cancellation.
-// Returns:
-//   - nil on success;
-//   - context.Cause(ctx) (one of ErrSkipCurrent, ErrAbortBatch, ErrUserQuit,
-//     or context.Canceled) when ctx was cancelled;
-//   - the underlying download/IO error on failure.
-//
-// Execute always waits for every part goroutine to exit before returning,
-// guaranteeing that no orphaned goroutines from the previous run can write
-// into a future TUI session's ui.Program handle.
 func Execute(ctx context.Context, url string, st *state.State, conn int, skiptls bool, proxyServer string, bwLimit string, timeout time.Duration) error {
 	var dl *HTTPDownloader
 	if st == nil {

@@ -58,7 +58,7 @@ func ShowMessage(msgType MessageType, title, message string) {
 	styleMessage := lipgloss.NewStyle().Foreground(cSteel)
 
 	titleLine := fmt.Sprintf("%s  %s", icon, styleTitle.Render(title))
-	
+
 	// Wrap message to fit box width
 	maxWidth := 60
 	lines := strings.Split(message, "\n")
@@ -88,9 +88,9 @@ func ShowMessage(msgType MessageType, title, message string) {
 			}
 		}
 	}
-	
+
 	content := titleLine + "\n\n" + styleMessage.Render(strings.Join(wrappedLines, "\n"))
-	
+
 	fmt.Println()
 	fmt.Println(styleBox.Render(content))
 	fmt.Println()

@@ -17,12 +17,6 @@ import (
 	"github.com/abzcoding/hget/internal/util"
 )
 
-// RunBatchDownloads reads URLs from filePath and downloads them one by one,
-// printing a live queue panel before each download and a final summary
-// afterwards.  ctx is the *batch* cancellation context — when it is cancelled
-// (typically by SIGINT routed through signal.NotifyContext, or by the user
-// pressing 'q' in the TUI) the loop exits cleanly and remaining items are
-// reported as "aborted".
 func RunBatchDownloads(ctx context.Context, filePath string, conn int, skiptls bool, proxy, bwLimit string, timeout time.Duration, verify bool) {
 	// ── Read and validate URL list ────────────────────────────────────────────
 	f, err := os.Open(filePath)
@@ -79,17 +73,6 @@ func RunBatchDownloads(ctx context.Context, filePath string, conn int, skiptls b
 
 	const sepW = 68
 	sep := styleSep.Render(strings.Repeat("┄", sepW))
-
-	// ── Item status tracking ──────────────────────────────────────────────────
-	type itemStatus int
-	const (
-		statusPending itemStatus = iota
-		statusActive
-		statusDone
-		statusFailed
-		statusSkipped
-		statusAborted
-	)
 
 	type item struct {
 		url    string
@@ -152,11 +135,6 @@ func RunBatchDownloads(ctx context.Context, filePath string, conn int, skiptls b
 		fmt.Println(styleBox.Render(hdr))
 		fmt.Println()
 
-		// Fixed cell widths so every row aligns regardless of glyph width.
-		// Some Unicode glyphs (◯ U+25EF "LARGE CIRCLE", ◉ U+25C9 "FISHEYE")
-		// are East-Asian Ambiguous and render as 2 cells in most terminals;
-		// others (⬢ ⤳ ⊘ ◈) render as 1.  Width-aware lipgloss styles let
-		// every column line up on every row.
 		iconCol := lipgloss.NewStyle().Width(3) // 1-cell glyph + 1 pad → 3
 		nameCol := lipgloss.NewStyle().Width(40)
 
@@ -288,6 +266,14 @@ func RunBatchDownloads(ctx context.Context, filePath string, conn int, skiptls b
 		var verifyDetail string
 		var didVerify bool
 
+		history := make([]ui.BatchItemSnapshot, len(items))
+		for j, h := range items {
+			history[j] = ui.BatchItemSnapshot{
+				Label:  h.file,
+				Status: itemStatusToBatch(h.status),
+			}
+		}
+
 		runErr := ui.RunWithTUI(ui.RunOptions{
 			Ctx: itemCtx,
 			OnSkip: func() {
@@ -303,6 +289,7 @@ func RunBatchDownloads(ctx context.Context, filePath string, conn int, skiptls b
 			WillVerify:   verify,
 			BatchCurrent: i + 1,
 			BatchTotal:   len(items),
+			BatchHistory: history,
 		}, func() error {
 			if err := downloader.Execute(itemCtx, it.url, st, conn, skiptls, proxy, bwLimit, timeout); err != nil {
 				return err
@@ -389,6 +376,33 @@ func RunBatchDownloads(ctx context.Context, filePath string, conn int, skiptls b
 			}())))
 	}
 	fmt.Println()
+}
+
+// ── Item status tracking (package-level so helpers can reference). ────────────
+
+type itemStatus int
+
+const (
+	statusPending itemStatus = iota
+	statusActive
+	statusDone
+	statusFailed
+	statusSkipped
+	statusAborted
+)
+
+func itemStatusToBatch(s itemStatus) ui.BatchItemStatus {
+	switch s {
+	case statusDone:
+		return ui.BatchItemDone
+	case statusSkipped:
+		return ui.BatchItemSkipped
+	case statusFailed:
+		return ui.BatchItemFailed
+	case statusAborted:
+		return ui.BatchItemAborted
+	}
+	return ui.BatchItemQueued
 }
 
 func truncateSummary(s string, maxLen int) string {

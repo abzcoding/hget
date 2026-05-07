@@ -38,24 +38,24 @@ func (v verifyAnimation) View() string {
 	// Animated key/lock visualization
 	keyChars := []string{"🔑", "🗝️"}
 	lockChars := []string{"🔒", "🔓"}
-	
+
 	keyIdx := (v.frame / 3) % len(keyChars)
 	lockIdx := (v.frame / 3) % len(lockChars)
-	
+
 	key := keyChars[keyIdx]
 	lock := lockChars[lockIdx]
-	
+
 	// Scanning animation
 	const scanWidth = 20
 	scanPos := v.frame % (scanWidth * 2)
 	if scanPos >= scanWidth {
 		scanPos = scanWidth*2 - scanPos - 1
 	}
-	
-	scanLine := strings.Repeat(" ", scanPos) + 
-		styleValue.Render("▓") + 
+
+	scanLine := strings.Repeat(" ", scanPos) +
+		styleValue.Render("▓") +
 		strings.Repeat(" ", scanWidth-scanPos-1)
-	
+
 	// Status with animated dots
 	dots := strings.Repeat(".", (v.frame/5)%4)
 	status := fmt.Sprintf("%s  %s%s",
@@ -63,13 +63,13 @@ func (v verifyAnimation) View() string {
 		styleDim.Render(dots),
 		strings.Repeat(" ", 3-len(dots)),
 	)
-	
+
 	visual := fmt.Sprintf("%s %s %s",
 		key,
 		styleDim.Render("→"),
 		lock,
 	)
-	
+
 	content := fmt.Sprintf("%s\n\n%s\n\n%s %s",
 		status,
 		visual,

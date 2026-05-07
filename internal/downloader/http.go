@@ -77,12 +77,10 @@ func NewHTTPDownloader(url string, par int, skipTLS bool, proxyServer string, bw
 	util.FatalCheck(err)
 
 	ipstr := util.FilterIPV4(ips)
-	ui.Printf("Resolved IP: %s\n", strings.Join(ipstr, " | "))
 
 	// Probe capabilities with HEAD, fallback to range GET.
 	var rangeSupported bool
 	var lenValue int64
-	lengthSpecified := false
 
 	// HEAD probe
 	req, err := http.NewRequest("HEAD", url, nil)
@@ -100,7 +98,6 @@ func NewHTTPDownloader(url string, par int, skipTLS bool, proxyServer string, bw
 		if cl := headResp.Header.Get(contentLengthHeader); cl != "" {
 			if v, perr := strconv.ParseInt(cl, 10, 64); perr == nil && v > 0 {
 				lenValue = v
-				lengthSpecified = true
 			}
 		}
 	}
@@ -122,7 +119,6 @@ func NewHTTPDownloader(url string, par int, skipTLS bool, proxyServer string, bw
 					if slash := strings.LastIndex(cr, "/"); slash != -1 && slash+1 < len(cr) {
 						if total, aerr := strconv.ParseInt(cr[slash+1:], 10, 64); aerr == nil && total > 0 {
 							lenValue = total
-							lengthSpecified = true
 						}
 					}
 				} else {
@@ -130,7 +126,6 @@ func NewHTTPDownloader(url string, par int, skipTLS bool, proxyServer string, bw
 					if cl := pr.Header.Get(contentLengthHeader); cl != "" {
 						if v, perr := strconv.ParseInt(cl, 10, 64); perr == nil && v > 0 {
 							lenValue = v
-							lengthSpecified = true
 						}
 					}
 				}
@@ -148,17 +143,6 @@ func NewHTTPDownloader(url string, par int, skipTLS bool, proxyServer string, bw
 		lenValue = 1 // progress bar does not accept 0 length
 		par = 1
 		resumable = false
-	}
-
-	ui.Printf("Connections: %d\n", par)
-
-	sizeInMb := float64(lenValue) / (1024 * 1024)
-	if !lengthSpecified {
-		ui.Printf("Size: unknown\n")
-	} else if sizeInMb < 1024 {
-		ui.Printf("Size: %.1f MB\n", sizeInMb)
-	} else {
-		ui.Printf("Size: %.1f GB\n", sizeInMb/1024)
 	}
 
 	file := util.TaskFromURL(url)

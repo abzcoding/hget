@@ -41,10 +41,10 @@ func (j joinAnimation) View(pct float64, current, total int) string {
 	// Show parts being assembled with moving arrows
 	const numBlocks = 8
 	blocks := make([]string, numBlocks)
-	
+
 	completedBlocks := int(pct * float64(numBlocks))
 	activeBlock := j.frame % numBlocks
-	
+
 	for i := 0; i < numBlocks; i++ {
 		if i < completedBlocks {
 			blocks[i] = styleDone.Render("▰")
@@ -56,9 +56,9 @@ func (j joinAnimation) View(pct float64, current, total int) string {
 			blocks[i] = styleDim.Render("▱")
 		}
 	}
-	
+
 	assembly := strings.Join(blocks, " ")
-	
+
 	// Status line with animated arrows
 	var arrows string
 	if pct < 1.0 {
@@ -67,18 +67,18 @@ func (j joinAnimation) View(pct float64, current, total int) string {
 	} else {
 		arrows = styleDone.Render("✓")
 	}
-	
+
 	statusLine := fmt.Sprintf("%s  %s  %s",
 		arrows,
 		styleValue.Render("ASSEMBLING"),
 		styleDim.Render(fmt.Sprintf("%d/%d parts", current, total)),
 	)
-	
+
 	pctLine := fmt.Sprintf("%s %s",
 		styleLabel.Render("progress"),
 		styleValue.Render(fmt.Sprintf("%.1f%%", pct*100)),
 	)
-	
+
 	content := fmt.Sprintf("%s\n\n%s\n\n%s",
 		statusLine,
 		assembly,
