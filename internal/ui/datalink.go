@@ -15,6 +15,8 @@ package ui
 // one canonical home.
 
 import (
+	cryptorand "crypto/rand"
+	"encoding/binary"
 	"fmt"
 	"math"
 	"math/rand"
@@ -72,12 +74,21 @@ type dataLink struct {
 }
 
 func newDataLink() dataLink {
+	// Use crypto/rand for seed to satisfy gosec
+	var seed int64
+	var b [8]byte
+	if _, err := cryptorand.Read(b[:]); err == nil {
+		seed = int64(binary.LittleEndian.Uint64(b[:]))
+	} else {
+		seed = time.Now().UnixNano()
+	}
+	
 	return dataLink{
 		pwr: led{brightness: 1},
 		cd:  led{brightness: 1},
 		oh:  led{brightness: 1},
 		aa:  led{brightness: 0.7},
-		rng: rand.New(rand.NewSource(time.Now().UnixNano())),
+		rng: rand.New(rand.NewSource(seed)),
 	}
 }
 
@@ -196,10 +207,18 @@ func (d *dataLink) View(
 		// All LEDs solid on completion
 		txOn, rxOn, aaOn = true, true, true
 	case "STOPPING", "SKIPPING":
-		statusColor = colorAmber
+		if status == "SKIPPING" {
+			statusColor = colorMagenta // Red for skip
+		} else {
+			statusColor = colorAmber // Amber for stop
+		}
 		pwrOn, cdOn = true, true
-		// OH (overload/halt) blinks
+		// OH blinks, TX/RX blink red for SKIPPING
 		ohOn = d.ticks%3 < 2
+		if status == "SKIPPING" {
+			txOn = d.ticks%4 < 2
+			rxOn = d.ticks%4 >= 2
+		}
 	case "ERROR":
 		statusColor = colorMagenta
 		pwrOn = true
@@ -305,7 +324,7 @@ func (d *dataLink) View(
 	// ── channel rows ─────────────────────────────────────────────────────
 	channelLines := make([]string, 0, len(channels))
 	for i, ch := range channels {
-		line := d.renderChannelRow(ch, i)
+		line := d.renderChannelRow(ch, i, status)
 		channelLines = append(channelLines, line)
 	}
 
@@ -331,7 +350,7 @@ func (d *dataLink) View(
 // renderChannelRow renders a single per-connection line:
 //
 //   ▸ CH·01  ┃▰▰▰▰▰▰▰▰▰▰▰▱▱▱▱▱▱▱▱▱▱▱┃   72.3%    ↓ 1.2 MB/s   ●●
-func (d *dataLink) renderChannelRow(ch channelRow, idx int) string {
+func (d *dataLink) renderChannelRow(ch channelRow, idx int, status string) string {
 	bullet := lipgloss.NewStyle().Foreground(colorAmber).Render("▸")
 	label := lipgloss.NewStyle().Foreground(colorSteel).Render(fmt.Sprintf("CH·%02d", ch.Index+1))
 
@@ -363,9 +382,16 @@ func (d *dataLink) renderChannelRow(ch channelRow, idx int) string {
 
 	// Per-channel activity LEDs (2 dots).
 	var act string
+	ledColor := colorPhosphor
+	if status == "SKIPPING" {
+		ledColor = colorMagenta // Red LEDs when skipping
+	} else if status == "ERROR" {
+		ledColor = colorMagenta
+	}
+	
 	if idx < len(d.chanLEDs) {
-		act = d.chanLEDs[idx][0].render(colorPhosphor, colorSlate) +
-			d.chanLEDs[idx][1].render(colorPhosphor, colorSlate)
+		act = d.chanLEDs[idx][0].render(ledColor, colorSlate) +
+			d.chanLEDs[idx][1].render(ledColor, colorSlate)
 	} else {
 		act = lipgloss.NewStyle().Foreground(colorSlate).Render("●●")
 	}

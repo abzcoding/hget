@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"os"
 	"os/signal"
 	"runtime"
@@ -78,21 +79,27 @@ func main() {
 	downloadURL := args[0]
 	destFile := util.TaskFromURL(downloadURL)
 
+	// Check if final file already exists
 	if _, err := os.Stat(destFile); err == nil {
 		if !ui.ConfirmRedownload(destFile) {
-			ui.Warnf("Skipping download — %s already exists.\n", destFile)
+			ui.ShowMessage(ui.MessageInfo, "DOWNLOAD SKIPPED", fmt.Sprintf("File already exists: %s", destFile))
 			if *verify {
 				ok, detail := downloader.RunVerify(downloadURL, *skiptls, proxy, *timeout)
 				ui.PrintVerifySummary(ok, detail)
 			}
 			return
 		}
+		// User wants to redownload — clean up any partial state
+		if util.ExistDir(state.FolderOf(downloadURL)) {
+			err := os.RemoveAll(state.FolderOf(downloadURL))
+			util.FatalCheck(err)
+		}
 	}
 
-	if util.ExistDir(state.FolderOf(downloadURL)) {
-		ui.Warnf("Downloading task already exists, remove it first\n")
-		err := os.RemoveAll(state.FolderOf(downloadURL))
-		util.FatalCheck(err)
+	// Check for resumable partial download
+	var st *state.State
+	if state.Exists(downloadURL) {
+		st, _ = state.PromptResume(downloadURL)
 	}
 
 	itemCtx, cancelItem := context.WithCancelCause(rootCtx)
@@ -110,7 +117,7 @@ func main() {
 		BatchCurrent: 0,
 		BatchTotal:   0,
 	}, func() error {
-		if err := downloader.Execute(itemCtx, downloadURL, nil, *conn, *skiptls, proxy, bwLimit, *timeout); err != nil {
+		if err := downloader.Execute(itemCtx, downloadURL, st, *conn, *skiptls, proxy, bwLimit, *timeout); err != nil {
 			return err
 		}
 		if *verify {
@@ -137,20 +144,20 @@ func runResume(rootCtx context.Context, resumeTask string, conn int, skiptls boo
 	st, err := state.Resume(resumeTask)
 	if err != nil {
 		if !os.IsNotExist(err) {
-			ui.Errorf("Resume failed: %v\n", err)
+			ui.ShowMessage(ui.MessageError, "RESUME FAILED", fmt.Sprintf("Could not load saved state: %v", err))
 			os.Exit(1)
 		}
 		// No state.json — try to reconstruct from existing part files.
 		st, err = downloader.ReconstructStateFromParts(resumeTask, skiptls, proxy, timeout)
 		if err == nil {
-			ui.Printf("Reconstructed state from %d part files — resuming.\n", len(st.Parts))
+			ui.ShowMessage(ui.MessageInfo, "STATE RECONSTRUCTED", fmt.Sprintf("Recovered %d part files — resuming download", len(st.Parts)))
 			runOne(rootCtx, st.URL, st, conn, skiptls, proxy, bwLimit, timeout)
 			return
 		}
 		// No part files either — start fresh if it looks like a URL.
-		ui.Warnf("No saved state found for %q — starting fresh download.\n", resumeTask)
+		ui.ShowMessage(ui.MessageWarning, "NO SAVED STATE", fmt.Sprintf("Starting fresh download for: %s", resumeTask))
 		if !util.IsURL(resumeTask) {
-			ui.Errorf("No saved state found for task %q and it is not a URL.\n", resumeTask)
+			ui.ShowMessage(ui.MessageError, "INVALID TASK", fmt.Sprintf("No saved state found and not a valid URL: %s", resumeTask))
 			os.Exit(1)
 		}
 		runOne(rootCtx, resumeTask, nil, conn, skiptls, proxy, bwLimit, timeout)

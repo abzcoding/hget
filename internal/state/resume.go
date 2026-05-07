@@ -11,6 +11,60 @@ import (
 	"github.com/abzcoding/hget/internal/util"
 )
 
+// Exists checks if saved state exists for the given URL or task name.
+func Exists(urlOrTask string) bool {
+	_, err := Read(urlOrTask)
+	return err == nil
+}
+
+// PromptResume checks if resumable state exists and asks the user whether to
+// resume or start fresh. Returns the state if resuming, nil if starting fresh.
+func PromptResume(urlOrTask string) (*State, bool) {
+	if !Exists(urlOrTask) {
+		return nil, true // no state, proceed with fresh download
+	}
+
+	// Load state to get download progress
+	st, err := Read(urlOrTask)
+	if err != nil {
+		return nil, true
+	}
+	
+	// Calculate total downloaded bytes
+	var downloaded int64
+	var total int64
+	for _, part := range st.Parts {
+		downloaded += part.RangeFrom
+		total += (part.RangeTo - part.RangeFrom + 1)
+	}
+	
+	// Show animated TUI prompt
+	resume, err := ui.ResumePrompt(util.TaskFromURL(urlOrTask), downloaded, total)
+	if err != nil {
+		// On error, default to fresh download
+		return nil, true
+	}
+	
+	if resume {
+		// Validate part files
+		st, err := Resume(urlOrTask)
+		if err != nil {
+			// If resume fails, start fresh
+			folder := FolderOf(urlOrTask)
+			_ = os.RemoveAll(folder)
+			return nil, true
+		}
+		return st, true
+	}
+	
+	// User chose not to resume — clean up old state
+	folder := FolderOf(urlOrTask)
+	if err := os.RemoveAll(folder); err != nil {
+		// Silently ignore cleanup errors
+	}
+	return nil, true
+}
+
 // TaskPrint reads and prints data about current download jobs.
 func TaskPrint() error {
 	usr, err := user.Current()

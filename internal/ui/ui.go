@@ -325,6 +325,9 @@ type tuiModel struct {
 	// of the download view; absorbs per-channel rows + aggregate bar so
 	// nothing is duplicated below.
 	link dataLink
+	modem modemHandshake
+	joinAnim joinAnimation
+	verifyAnim verifyAnimation
 
 	// terminal width
 	width int
@@ -355,6 +358,9 @@ func NewTUIModel(numConns int, willVerify bool, batchCurrent, batchTotal int, on
 		onQuit:        onQuit,
 		speedHistory:  make([]float64, 0, sparklineWidth),
 		link:          newDataLink(),
+		modem:         newModemHandshake(),
+		joinAnim:      newJoinAnimation(),
+		verifyAnim:    newVerifyAnimation(),
 	}
 }
 
@@ -482,6 +488,22 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			partSpeeds[i] = p.speed
 		}
 		m.link.Tick(totalSpeed, m.peakSpeed, partSpeeds)
+		
+		// Advance modem handshake animation when not started
+		if !m.started {
+			m.modem.Tick()
+		}
+		
+		// Advance join animation when joining
+		if m.joining {
+			m.joinAnim.Tick()
+		}
+		
+		// Advance verify animation when verifying
+		if m.verifying {
+			m.verifyAnim.Tick()
+		}
+		
 		if len(m.speedHistory) == 0 || time.Since(m.startTime).Milliseconds()%160 < 20 {
 			m.speedHistory = append(m.speedHistory, totalSpeed)
 			if len(m.speedHistory) > sparklineWidth {
@@ -695,10 +717,18 @@ func (m tuiModel) View() string {
 
 	// Pre-start spinner.
 	if !m.started && !m.hasError {
-		b.WriteString("  " + m.spinner.View() + "  Resolving…\n")
+		// Animated modem handshake
+		modemView := m.modem.View(m.url)
+		// Center the modem box
+		for _, line := range strings.Split(modemView, "\n") {
+			b.WriteString(line + "\n")
+		}
+		b.WriteString("\n")
+		
 		if m.stopping || m.skipping {
 			b.WriteString("\n" + m.renderStopOverlay() + "\n")
 		}
+		
 		b.WriteString(sep + "\n")
 		b.WriteString(m.renderFooter())
 		return b.String()
@@ -824,10 +854,17 @@ func (m tuiModel) View() string {
 
 	// Verifying phase (download+join complete, waiting for GPG result).
 	if m.verifying && !m.done {
-		b.WriteString("  " + m.spinner.View() + "  Verifying GPG signature…\n")
+		// Animated verify box
+		verifyView := m.verifyAnim.View()
+		for _, line := range strings.Split(verifyView, "\n") {
+			b.WriteString(line + "\n")
+		}
+		b.WriteString("\n")
+		
 		if m.stopping || m.skipping {
 			b.WriteString("\n" + m.renderStopOverlay() + "\n")
 		}
+		
 		b.WriteString(sep + "\n")
 		b.WriteString(m.renderFooter())
 		return b.String()
@@ -835,10 +872,12 @@ func (m tuiModel) View() string {
 
 	// Join phase.
 	if m.joining {
+		// Animated join box
 		pct := math.Min(m.joinPct, 1.0)
-		b.WriteString("  " + stylePartLabel.Render("Join") + "  ")
-		b.WriteString(m.joinBar.ViewAs(pct))
-		b.WriteString(fmt.Sprintf("  %5.1f%%\n", pct*100))
+		joinView := m.joinAnim.View(pct, m.joinCurrent, m.joinTotal)
+		for _, line := range strings.Split(joinView, "\n") {
+			b.WriteString(line + "\n")
+		}
 		b.WriteString("\n" + sep + "\n")
 	} else {
 		// Build per-channel rows for the data-link panel.

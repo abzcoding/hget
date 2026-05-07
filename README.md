@@ -10,12 +10,14 @@
 ## Features
 
 - **Parallel downloading** — splits files into chunks and downloads them simultaneously over multiple connections
-- **Live "carrier" TUI** — refined phosphor-cyan / amber telemetry palette, per-part progress with status glyphs (`⬢ ◉ ◯`), animated overall bar, ETA, per-connection speed readouts, plus a rolling **speed-history sparkline** showing recent throughput trend and peak. Driven by [Bubble Tea](https://github.com/charmbracelet/bubbletea), [Bubbles](https://github.com/charmbracelet/bubbles), [Lip Gloss](https://github.com/charmbracelet/lipgloss), and [Harmonica](https://github.com/charmbracelet/harmonica) spring physics
+- **Retro modem-themed TUI** — vintage data-link terminal aesthetic with animated dial-up handshake, blinking status LEDs (PWR/CD/TX/RX/OH/AA), per-channel progress bars, and aggregate signal meter. Animated file assembly and GPG verification phases. All driven by [Bubble Tea](https://github.com/charmbracelet/bubbletea), [Bubbles](https://github.com/charmbracelet/bubbles), [Lip Gloss](https://github.com/charmbracelet/lipgloss), and [Harmonica](https://github.com/charmbracelet/harmonica) spring physics
+- **Auto-resume detection** — automatically detects partial downloads and prompts to resume without requiring `--resume` flag
 - **Real cancellation** — `q` / `Ctrl-C` actually stops the current download (state saved when resumable); `s` in batch mode skips the current item; `Ctrl-C` (or `q` in batch mode) aborts the entire queue. A live "stopping…/skipping…" overlay shows progress while state is drained safely
+- **Visual state feedback** — LED patterns signal every state: handshake (TX/RX blink), downloading (all active), stopping (OH blinks amber), skipping (all blink red), complete (all solid), error (OH solid red)
 - **Beautiful console logging** — colored, structured output via [charmbracelet/log](https://github.com/charmbracelet/log) when running non-interactively
 - **GPG signature verification** — pass `--verify` to automatically fetch the `.sig` file and verify it with GPG; result is shown inline in the TUI completion screen
 - **Smart re-download prompt** — if the target file already exists, a styled [Huh](https://github.com/charmbracelet/huh) confirmation form asks before overwriting
-- **Interrupt & resume** — `q` / `Ctrl-C` at any point persists byte offsets to `~/.hget/<task>/state.json`; resume later with `--resume`
+- **Interrupt & resume** — `q` / `Ctrl-C` at any point persists byte offsets to `~/.hget/<task>/state.json`; resume automatically on next run or explicitly with `--resume`
 - **State reconstruction** — if the state file is missing, reconstructs progress from existing part files
 - **Bandwidth limiting** — cap aggregate download speed with `--rate` (e.g. `5MiB`, `500kB`)
 - **Proxy support** — HTTP and SOCKS5 proxies via `--proxy`
@@ -41,6 +43,10 @@ make install        # builds to ./bin/hget and copies to /usr/local/bin
 
 ```bash
 # Download a file with 8 parallel connections
+hget -n 8 https://example.com/largefile.iso
+
+# If you interrupt (Ctrl-C), just run the same command again
+# hget will detect the partial download and ask if you want to resume
 hget -n 8 https://example.com/largefile.iso
 
 # Limit bandwidth to 5 MB/s across all connections
@@ -92,15 +98,17 @@ hget -n 16 -rate 10MiB "https://releases.ubuntu.com/24.04/ubuntu-24.04-live-serv
 
 ## How It Works
 
-1. **Probe** — `HEAD` request (falls back to `GET bytes=0-0`) detects `Accept-Ranges` and `Content-Length`.
-2. **Exists check** — if the destination file is already present, a [Huh](https://github.com/charmbracelet/huh) confirmation form asks whether to overwrite (skipped in non-TTY mode).
-3. **Split** — file is divided into *n* equal byte ranges; each range is stored as `~/.hget/<task>/<task>.part000000` … `.partN`.
-4. **Download** — goroutines download each part concurrently, appending bytes to their part file; a shared `rate.Limiter` enforces the bandwidth cap across all connections.
-5. **Join** — on completion, part files are sorted lexicographically and concatenated into the final file in the working directory.
-6. **Verify** *(optional, `--verify`)* — the `.sig` file is fetched from `<URL>.sig`, written next to the download, and passed to `gpg --verify`. The result (`✓ Valid` / `✗ Invalid`) is shown on the TUI completion screen and the `.sig` file is cleaned up.
-7. **Cleanup** — `~/.hget/<task>/` is removed.
+1. **Handshake** — animated modem connection sequence shows 4 phases: DIALING → CARRIER DETECT → HANDSHAKE → LINK ESTABLISHED
+2. **Probe** — `HEAD` request (falls back to `GET bytes=0-0`) detects `Accept-Ranges` and `Content-Length`
+3. **Resume check** — if partial download exists, prompts "Resume from where you left off? [Y/n]"
+4. **Exists check** — if the destination file is already present, a [Huh](https://github.com/charmbracelet/huh) confirmation form asks whether to overwrite (skipped in non-TTY mode)
+5. **Split** — file is divided into *n* equal byte ranges; each range is stored as `~/.hget/<task>/<task>.part000000` … `.partN`
+6. **Download** — data-link panel shows per-channel progress with blinking activity LEDs; goroutines download each part concurrently; a shared `rate.Limiter` enforces the bandwidth cap
+7. **Join** — animated assembly visualization shows parts being merged; files are sorted lexicographically and concatenated into the final file
+8. **Verify** *(optional, `--verify`)* — animated key/lock visualization while `.sig` file is fetched and `gpg --verify` runs; result shown on completion screen
+9. **Cleanup** — `~/.hget/<task>/` is removed
 
-On **Ctrl-C** the current byte offsets are persisted to `~/.hget/<task>/state.json` so the download resumes exactly where it left off.
+On **Ctrl-C** or **q**, the data-link panel shows STOPPING status with blinking OH LED while byte offsets are persisted to `~/.hget/<task>/state.json`. On **s** (skip in batch mode), all LEDs blink red while the download is discarded.
 
 ## Project Structure
 

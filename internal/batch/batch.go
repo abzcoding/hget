@@ -27,7 +27,7 @@ func RunBatchDownloads(ctx context.Context, filePath string, conn int, skiptls b
 	// ── Read and validate URL list ────────────────────────────────────────────
 	f, err := os.Open(filePath)
 	if err != nil {
-		ui.Errorf("could not open URL list %s: %v\n", filePath, err)
+		ui.ShowMessage(ui.MessageError, "FILE ERROR", fmt.Sprintf("Could not open URL list: %s\n%v", filePath, err))
 		return
 	}
 	defer f.Close()
@@ -42,12 +42,12 @@ func RunBatchDownloads(ctx context.Context, filePath string, conn int, skiptls b
 		urls = append(urls, line)
 	}
 	if scanErr := scanner.Err(); scanErr != nil {
-		ui.Errorf("error reading %s: %v\n", filePath, scanErr)
+		ui.ShowMessage(ui.MessageError, "READ ERROR", fmt.Sprintf("Error reading file: %s\n%v", filePath, scanErr))
 		return
 	}
 
 	if len(urls) == 0 {
-		ui.Warnf("No URLs found in %s\n", filePath)
+		ui.ShowMessage(ui.MessageWarning, "EMPTY FILE", fmt.Sprintf("No URLs found in: %s", filePath))
 		return
 	}
 
@@ -252,7 +252,7 @@ func RunBatchDownloads(ctx context.Context, filePath string, conn int, skiptls b
 		// File-exists check (isatty gate is inside ui.ConfirmRedownload).
 		if _, statErr := os.Stat(it.file); statErr == nil {
 			if !ui.ConfirmRedownload(it.file) {
-				ui.Warnf("Skipping — %s already exists.\n", it.file)
+				ui.ShowMessage(ui.MessageInfo, "FILE EXISTS", fmt.Sprintf("Skipping: %s", it.file))
 				it.status = statusSkipped
 				it.reason = "already exists"
 				if verify {
@@ -266,13 +266,18 @@ func RunBatchDownloads(ctx context.Context, filePath string, conn int, skiptls b
 				fmt.Println()
 				continue
 			}
+			// User wants to redownload — clean up any partial state
+			if util.ExistDir(state.FolderOf(it.url)) {
+				if rmErr := os.RemoveAll(state.FolderOf(it.url)); rmErr != nil {
+					ui.Warnf("Could not remove old state: %v\n", rmErr)
+				}
+			}
 		}
 
-		// Remove stale temp dir.
-		if util.ExistDir(state.FolderOf(it.url)) {
-			if rmErr := os.RemoveAll(state.FolderOf(it.url)); rmErr != nil {
-				ui.Warnf("Could not remove old temp dir: %v\n", rmErr)
-			}
+		// Check for resumable partial download
+		var st *state.State
+		if state.Exists(it.url) {
+			st, _ = state.PromptResume(it.url)
 		}
 
 		// Per-item context derived from the batch context, with cancel
@@ -299,7 +304,7 @@ func RunBatchDownloads(ctx context.Context, filePath string, conn int, skiptls b
 			BatchCurrent: i + 1,
 			BatchTotal:   len(items),
 		}, func() error {
-			if err := downloader.Execute(itemCtx, it.url, nil, conn, skiptls, proxy, bwLimit, timeout); err != nil {
+			if err := downloader.Execute(itemCtx, it.url, st, conn, skiptls, proxy, bwLimit, timeout); err != nil {
 				return err
 			}
 			if verify {
