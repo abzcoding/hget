@@ -33,7 +33,14 @@ var (
 func Execute(ctx context.Context, url string, st *state.State, conn int, skiptls bool, proxyServer string, bwLimit string, timeout time.Duration) error {
 	var dl *HTTPDownloader
 	if st == nil {
-		dl = NewHTTPDownloader(url, conn, skiptls, proxyServer, bwLimit, timeout)
+		var err error
+		dl, err = NewHTTPDownloader(url, conn, skiptls, proxyServer, bwLimit, timeout)
+		if err != nil {
+			if ui.Program != nil {
+				ui.Program.Send(ui.DownloadErrorMsg{Err: err})
+			}
+			return err
+		}
 	} else {
 		client := ProxyAwareHTTPClient(proxyServer, skiptls, timeout)
 		dl = NewHTTPDownloaderFromState(st, client, proxyServer, skiptls, timeout)
@@ -189,7 +196,7 @@ loop:
 // RunVerify downloads the .sig file for url and runs gpg --verify.
 // It sends TUI messages when ui.Program is active (during the TUI alt-screen).
 // It always returns (ok, detail) so the caller can print a post-TUI summary.
-func RunVerify(url string, skipTLS bool, proxyServer string, timeout time.Duration) (ok bool, detail string) {
+func RunVerify(ctx context.Context, url string, skipTLS bool, proxyServer string, timeout time.Duration) (ok bool, detail string) {
 	sigURL := buildSigURL(url)
 	destFile := util.TaskFromURL(url)
 	sigFile := destFile + ".sig"
@@ -200,7 +207,7 @@ func RunVerify(url string, skipTLS bool, proxyServer string, timeout time.Durati
 		ui.Printf("Fetching signature from %s\n", sigURL)
 	}
 
-	if err := DownloadSigFile(sigURL, sigFile, skipTLS, proxyServer, timeout); err != nil {
+	if err := DownloadSigFile(ctx, sigURL, sigFile, skipTLS, proxyServer, timeout); err != nil {
 		msg := fmt.Sprintf("could not download .sig file: %v", err)
 		if ui.Program != nil {
 			ui.Program.Send(ui.VerifyDoneMsg{OK: false, Detail: msg})

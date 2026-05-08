@@ -45,14 +45,14 @@ func RunBatchDownloads(ctx context.Context, filePath string, conn int, skiptls b
 		return
 	}
 
-	// ── Palette & styles ("carrier" palette — mirrors the TUI) ───────────────
-	cPhosphor := lipgloss.Color("#73E0FF") // dominant cyan
-	cAmber := lipgloss.Color("#FFB75A")    // sharp accent
-	cMint := lipgloss.Color("#5EE6A1")     // success
-	cMagenta := lipgloss.Color("#FF5478")  // error
-	cSteel := lipgloss.Color("#5A6B85")    // chrome / labels
-	cSlate := lipgloss.Color("#3A475C")    // dim chrome
-	cFrost := lipgloss.Color("#E8F1F8")    // highlight
+	// ── Palette & styles — drawn from the central ui.Theme ───────────────────
+	cPhosphor := ui.Theme.Phosphor
+	cAmber := ui.Theme.Amber
+	cMint := ui.Theme.Mint
+	cMagenta := ui.Theme.Magenta
+	cSteel := ui.Theme.Steel
+	cSlate := ui.Theme.Slate
+	cFrost := ui.Theme.Frost
 
 	styleSep := lipgloss.NewStyle().Foreground(cSlate)
 	styleCounter := lipgloss.NewStyle().Foreground(cAmber).Bold(true)
@@ -234,7 +234,7 @@ func RunBatchDownloads(ctx context.Context, filePath string, conn int, skiptls b
 				it.status = statusSkipped
 				it.reason = "already exists"
 				if verify {
-					ok, detail := downloader.RunVerify(it.url, skiptls, proxy, timeout)
+					ok, detail := downloader.RunVerify(ctx, it.url, skiptls, proxy, timeout)
 					ui.PrintVerifySummary(ok, detail)
 					if !ok {
 						it.status = statusFailed
@@ -295,7 +295,7 @@ func RunBatchDownloads(ctx context.Context, filePath string, conn int, skiptls b
 				return err
 			}
 			if verify {
-				verifyOK, verifyDetail = downloader.RunVerify(it.url, skiptls, proxy, timeout)
+				verifyOK, verifyDetail = downloader.RunVerify(itemCtx, it.url, skiptls, proxy, timeout)
 				didVerify = true
 				if !verifyOK {
 					return fmt.Errorf("signature: %s", verifyDetail)

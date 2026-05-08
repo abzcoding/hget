@@ -139,11 +139,11 @@ func (m *mainframe) Tick() {
 // at mainframeWidth.  The bottom row carries the bus port glyph that
 // cable.go aligns its trunk against.
 func (m mainframe) View() string {
-	chrome := lipgloss.NewStyle().Foreground(colorPhosphor)
-	frame := lipgloss.NewStyle().Foreground(colorSlate)
-	steel := lipgloss.NewStyle().Foreground(colorSteel)
-	frost := lipgloss.NewStyle().Foreground(colorFrost).Bold(true)
-	brand := lipgloss.NewStyle().Foreground(colorAmber).Bold(true)
+	chrome := fgStyle(colorPhosphor)
+	frame := fgStyle(colorSlate)
+	steel := fgStyle(colorSteel)
+	frost := fgBoldStyle(colorFrost)
+	brand := fgBoldStyle(colorAmber)
 
 	// Pick LED palette + status text per state.
 	var ledOn lipgloss.Color
@@ -166,11 +166,11 @@ func (m mainframe) View() string {
 	ledRune := func(b float64) string {
 		switch {
 		case b >= 0.7:
-			return lipgloss.NewStyle().Foreground(ledOn).Bold(true).Render("●")
+			return fgBoldStyle(ledOn).Render("●")
 		case b >= 0.3:
-			return lipgloss.NewStyle().Foreground(ledOn).Render("●")
+			return fgStyle(ledOn).Render("●")
 		default:
-			return lipgloss.NewStyle().Foreground(ledDim).Render("·")
+			return fgStyle(ledDim).Render("·")
 		}
 	}
 
@@ -239,7 +239,7 @@ func (m mainframe) View() string {
 		if on {
 			col = accent
 		}
-		dot := lipgloss.NewStyle().Foreground(col).Bold(true).Render("◉")
+		dot := fgBoldStyle(col).Render("◉")
 		return dot + " " + steel.Render(name)
 	}
 	pwrOn := m.state != mfAlarm
@@ -373,7 +373,7 @@ func (m mainframe) View() string {
 
 	// Tape bay content: a small reel window centered.
 	reelArt := func(idx int) string {
-		drumStyled := lipgloss.NewStyle().Foreground(ledOn).Bold(true).Render(drumGlyph(idx))
+		drumStyled := fgBoldStyle(ledOn).Render(drumGlyph(idx))
 		// 2-row reel: ╭───╮ / │ ◐ │ — but we need 2 rows fitting in a bay
 		// content area of 2 rows.  So:
 		//   row1: ╭───╮
@@ -387,7 +387,7 @@ func (m mainframe) View() string {
 		// 2-row card slot.  No side rails — renderBay wraps already.
 		// Row 1: a notched slot edge (the card-feed lip).
 		// Row 2: animated punch-card fill that scrolls when transferring.
-		fillSty := lipgloss.NewStyle().Foreground(ledOn).Render(cardFill)
+		fillSty := fgStyle(ledOn).Render(cardFill)
 		row1 := frame.Render("╶" + strings.Repeat("─", cardSlotW) + "╴")
 		row2 := " " + fillSty + " "
 		return row1 + "\n" + row2
@@ -409,7 +409,7 @@ func (m mainframe) View() string {
 
 	// ── Row 15: status caption row. ─────────────────────────────────────
 	statusContent := steel.Render("STATUS: ") +
-		lipgloss.NewStyle().Foreground(statusCol).Bold(true).Render(statusStr)
+		fgBoldStyle(statusCol).Render(statusStr)
 	b.WriteString(chrome.Render("║ ") + pad(statusContent, inner-2) + chrome.Render(" ║") + "\n")
 
 	// ── Row 16: divider before bus. ─────────────────────────────────────

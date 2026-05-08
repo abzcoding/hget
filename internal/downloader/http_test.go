@@ -43,7 +43,10 @@ func TestPartCalculate(t *testing.T) {
 	}
 
 	for _, tc := range testCases {
-		parts := PartCalculate(tc.parts, tc.totalSize, tc.url)
+		parts, err := PartCalculate(tc.parts, tc.totalSize, tc.url)
+		if err != nil {
+			t.Fatalf("PartCalculate failed: %v", err)
+		}
 
 		if len(parts) != tc.expectParts {
 			t.Errorf("Expected %d parts, got %d", tc.expectParts, len(parts))
@@ -355,7 +358,10 @@ func TestNewHTTPDownloaderProbe(t *testing.T) {
 	ts := httptest.NewServer(h)
 	defer ts.Close()
 
-	d := NewHTTPDownloader(ts.URL, 4, false, "", "", 15*time.Second)
+	d, err := NewHTTPDownloader(ts.URL, 4, false, "", "", 15*time.Second)
+	if err != nil {
+		t.Fatalf("NewHTTPDownloader failed: %v", err)
+	}
 	if d.par != 4 {
 		t.Fatalf("expected par=4, got %d", d.par)
 	}
@@ -399,7 +405,10 @@ func TestNewHTTPDownloaderRangeFallback(t *testing.T) {
 	ts := httptest.NewServer(h)
 	defer ts.Close()
 
-	d := NewHTTPDownloader(ts.URL, 4, false, "", "", 15*time.Second)
+	d, err := NewHTTPDownloader(ts.URL, 4, false, "", "", 15*time.Second)
+	if err != nil {
+		t.Fatalf("NewHTTPDownloader failed: %v", err)
+	}
 	if d.par != 4 {
 		t.Fatalf("expected par=4, got %d", d.par)
 	}

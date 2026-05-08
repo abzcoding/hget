@@ -1,6 +1,7 @@
 package downloader
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,9 +13,6 @@ import (
 	"time"
 )
 
-// buildSigURL appends ".sig" to the *path* of a URL while preserving query
-// strings and fragments — so e.g. "https://x/file.iso?token=abc" becomes
-// "https://x/file.iso.sig?token=abc", not "…iso?token=abc.sig".
 func buildSigURL(rawURL string) string {
 	u, err := stdurl.Parse(rawURL)
 	if err != nil || u.Path == "" {
@@ -27,12 +25,13 @@ func buildSigURL(rawURL string) string {
 	return u.String()
 }
 
-// DownloadSigFile fetches the detached GPG signature file at sigURL and writes
-// it to destPath.  It reuses the same proxy/TLS settings as the main download.
-func DownloadSigFile(sigURL, destPath string, skipTLS bool, proxyServer string, timeout time.Duration) error {
+func DownloadSigFile(ctx context.Context, sigURL, destPath string, skipTLS bool, proxyServer string, timeout time.Duration) (err error) {
 	client := ProxyAwareHTTPClient(proxyServer, skipTLS, timeout)
 
-	req, err := http.NewRequest(http.MethodGet, sigURL, nil)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, sigURL, nil)
 	if err != nil {
 		return fmt.Errorf("building sig request: %w", err)
 	}
@@ -53,21 +52,22 @@ func DownloadSigFile(sigURL, destPath string, skipTLS bool, proxyServer string, 
 	if err != nil {
 		return fmt.Errorf("creating sig file: %w", err)
 	}
-	defer f.Close()
+	// Surface flush/close errors so a full disk doesn't silently truncate.
+	defer func() {
+		if cerr := f.Close(); cerr != nil && err == nil {
+			err = fmt.Errorf("closing sig file: %w", cerr)
+		}
+	}()
 
 	if _, err = io.Copy(f, resp.Body); err != nil {
 		return fmt.Errorf("writing sig file: %w", err)
 	}
+	if err = f.Sync(); err != nil {
+		return fmt.Errorf("flushing sig file: %w", err)
+	}
 	return nil
 }
 
-// VerifyGPGSignature runs `gpg --verify sigPath filePath` and returns an error
-// (including gpg's stderr output) when verification fails.
-//
-// It passes --keyserver-options auto-key-retrieve so missing public keys are
-// fetched automatically from the default keyserver.  When the key still cannot
-// be found (e.g. the keyserver is unreachable), the key fingerprint parsed from
-// gpg output is included in the error so the caller can surface a manual hint.
 func VerifyGPGSignature(sigPath, filePath string) (string, error) {
 	gpgBin, err := exec.LookPath("gpg")
 	if err != nil {
@@ -77,10 +77,12 @@ func VerifyGPGSignature(sigPath, filePath string) (string, error) {
 		}
 	}
 
-	// #nosec G204 – sigPath and filePath are derived from user-supplied URL and cwd
+	// #nosec G204 – sigPath and filePath are derived from user-supplied URL and cwd.
+	// The "--" sentinel prevents argument injection if either path begins with '-'
+	// (e.g. a malicious URL ending in "/--logger-fd=…").
 	cmd := exec.Command(gpgBin,
 		"--keyserver-options", "auto-key-retrieve",
-		"--verify", sigPath, filePath,
+		"--verify", "--", sigPath, filePath,
 	)
 	out, err := cmd.CombinedOutput()
 	detail := strings.TrimSpace(string(out))

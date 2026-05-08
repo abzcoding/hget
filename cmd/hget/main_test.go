@@ -166,7 +166,10 @@ func TestE2EResumeDownload(t *testing.T) {
 	ts, _ := startTestServer(t, content, true, true, true, true, path)
 	url := ts.URL + path
 
-	parts := downloader.PartCalculate(4, int64(len(content)), url)
+	parts, err := downloader.PartCalculate(4, int64(len(content)), url)
+	if err != nil {
+		t.Fatalf("PartCalculate failed: %v", err)
+	}
 	folder := state.FolderOf(url)
 	if err := util.MkdirIfNotExist(folder); err != nil {
 		t.Fatalf("failed to create folder: %v", err)

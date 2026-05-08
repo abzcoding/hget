@@ -21,10 +21,10 @@ func (j *joinAnimation) Tick() {
 }
 
 func (j joinAnimation) View(pct float64, current, total int) string {
-	cAmber := lipgloss.Color("#FFB75A")
-	cMint := lipgloss.Color("#5EE6A1")
-	cSteel := lipgloss.Color("#5A6B85")
-	cSlate := lipgloss.Color("#3A475C")
+	cAmber := Theme.Amber
+	cMint := Theme.Mint
+	cSteel := Theme.Steel
+	cSlate := Theme.Slate
 
 	styleBox := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).

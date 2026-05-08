@@ -9,14 +9,16 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/bubbles/help"
+	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/progress"
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/harmonica"
+	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/huh"
 	"github.com/charmbracelet/lipgloss"
 	charmlog "github.com/charmbracelet/log"
-	"github.com/mattn/go-colorable"
 	"github.com/mattn/go-isatty"
 )
 
@@ -26,30 +28,24 @@ var DisplayProgress = true
 
 // ── Colors ────────────────────────────────────────────────────────────────────
 //
-// "Carrier" palette — refined network telemetry.
-// One dominant data colour (phosphor cyan), one sharp accent (amber).
-// Success / error are the only places we use other hues, so they actually pop.
-//
-//	Dominant:  phosphor cyan       — data, totals, primary bars
-//	Accent:    amber               — active operations, ETA, in-flight speed
-//	Success:   mint                — completed states only
-//	Error:     hot magenta         — distinct from cliched ANSI red
-//	Chrome:    steel               — frames, separators, secondary labels
-//	Highlight: frost               — key values, banner
+// All colour values live in theme.go (ui.Theme).  The names below are
+// short package-local aliases so renderers can write `colorPhosphor`
+// without prefacing every reference with `Theme.`.  Aliases are kept so
+// existing call-sites (banner, log icons, verify summary, batch styles)
+// keep compiling.
 
 var (
-	colorPhosphor = lipgloss.Color("#73E0FF") // dominant cyan
-	colorAmber    = lipgloss.Color("#FFB75A") // sharp accent
-	colorMint     = lipgloss.Color("#5EE6A1") // success
-	colorMagenta  = lipgloss.Color("#FF5478") // error
-	colorSteel    = lipgloss.Color("#5A6B85") // chrome / labels
-	colorSlate    = lipgloss.Color("#3A475C") // dimmer chrome (separators)
-	colorFrost    = lipgloss.Color("#E8F1F8") // highlight values
-	colorDeepCyan = lipgloss.Color("#1E7A99") // bar gradient start
+	colorPhosphor = Theme.Phosphor
+	colorAmber    = Theme.Amber
+	colorMint     = Theme.Mint
+	colorMagenta  = Theme.Magenta
+	colorSteel    = Theme.Steel
+	colorSlate    = Theme.Slate
+	colorFrost    = Theme.Frost
+	colorDeepCyan = Theme.DeepCyan
 
-	// Aliases preserved so existing references (banner, log icons, verify
-	// summary, batch styles) keep compiling without code churn.
-	colorPurple = colorPhosphor // banner / accent — repurposed to phosphor
+	// Legacy hue aliases — phased out in favour of the carrier names above.
+	colorPurple = colorPhosphor
 	colorCyan   = colorPhosphor
 	colorGreen  = colorMint
 	colorYellow = colorAmber
@@ -123,8 +119,6 @@ var (
 	styleDone      = lipgloss.NewStyle().Foreground(colorGreen).Bold(true)
 	styleETA       = lipgloss.NewStyle().Foreground(colorYellow)
 	styleError     = lipgloss.NewStyle().Foreground(colorRed).Bold(true)
-	styleVerifyOK  = lipgloss.NewStyle().Foreground(colorGreen).Bold(true)
-	styleVerifyBad = lipgloss.NewStyle().Foreground(colorRed).Bold(true)
 	styleErrBox    = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(colorRed).
@@ -772,8 +766,11 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.joinAnim.Tick()
 		}
 
-		// Advance verify animation when verifying
-		if m.verifying {
+		// Advance verify animation while the vault panel is on screen —
+		// either during scanning (verifying=true) or after the result
+		// is known but the closing screen is still visible (verifyDone
+		// + willVerify), so the LEDs and rivet rows keep their pulse.
+		if m.verifying || (m.verifyDone && m.willVerify) {
 			m.verifyAnim.Tick()
 		}
 
@@ -862,6 +859,15 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.verifyDone = true
 		m.verifyOK = msg.OK
 		m.verifyDetail = msg.Detail
+		// Drive the vault panel into its terminal state with parsed
+		// signing details — replaces the bespoke "verifying…" spinner
+		// with a structured fingerprint / signed-by readout.
+		details := ParseGPGOutput(msg.Detail)
+		if msg.OK {
+			m.verifyAnim.SetVerified(details)
+		} else {
+			m.verifyAnim.SetBreached(details)
+		}
 		return m, nil
 
 	case StoppingMsg:
@@ -1110,23 +1116,20 @@ func (m tuiModel) View() string {
 		b.WriteString("    " + styleLabel.Render("avg") + " " + styleAccentValue.Render(formatSpeed(avg)) + "\n")
 		b.WriteString("    " + styleLabel.Render("peak") + " " + styleAccentValue.Render(formatSpeed(m.peakSpeed)) + "\n")
 		b.WriteString("    " + styleLabel.Render("saved") + " " + styleValue.Render(m.fileName) + "\n")
-		// Verification result row.
+		// Verification result — render the full vault panel beneath the
+		// summary so success / failure carries the same chrome / LED
+		// vibe as the rest of the carrier theme, with parsed fingerprint
+		// + signed-by detail rows.
 		if m.willVerify {
-			b.WriteString("    " + styleLabel.Render("sig") + " ")
-			if m.verifyDone {
-				if m.verifyOK {
-					b.WriteString(styleVerifyOK.Render("⬢ valid") + "\n")
-				} else {
-					b.WriteString(styleVerifyBad.Render("◈ invalid") + "\n")
-					if m.verifyDetail != "" {
-						lines := strings.SplitN(strings.TrimSpace(m.verifyDetail), "\n", 3)
-						for _, l := range lines {
-							b.WriteString("         " + styleLogError.Render(truncate(l, w-11)) + "\n")
-						}
-					}
-				}
-			} else {
-				b.WriteString(m.spinner.View() + "  verifying…\n")
+			b.WriteString("\n")
+			vaultPad := (w - vaultWidth) / 2
+			if vaultPad < 0 {
+				vaultPad = 0
+			}
+			vPadStr := strings.Repeat(" ", vaultPad)
+			vaultView := m.verifyAnim.View()
+			for _, line := range strings.Split(vaultView, "\n") {
+				b.WriteString(vPadStr + line + "\n")
 			}
 		}
 		b.WriteString("\n" + sep + "\n")
@@ -1136,10 +1139,14 @@ func (m tuiModel) View() string {
 
 	// Verifying phase (download+join complete, waiting for GPG result).
 	if m.verifying && !m.done {
-		// Animated verify box
+		vaultPad := (w - vaultWidth) / 2
+		if vaultPad < 0 {
+			vaultPad = 0
+		}
+		vPadStr := strings.Repeat(" ", vaultPad)
 		verifyView := m.verifyAnim.View()
 		for _, line := range strings.Split(verifyView, "\n") {
-			b.WriteString(line + "\n")
+			b.WriteString(vPadStr + line + "\n")
 		}
 		b.WriteString("\n")
 
@@ -1602,20 +1609,79 @@ func (m tuiModel) renderStopOverlay() string {
 	return styleStopBox.MarginLeft(2).Render(text)
 }
 
-// renderFooter renders the bottom help bar.  Keys are rendered as small
-// rounded "key cap" pills so available actions read at a glance.
-func (m tuiModel) renderFooter() string {
-	var parts []string
-	if m.stopping {
-		parts = append(parts, styleHelp.Render("press ")+styleKeyCap.Render("q")+styleHelp.Render(" again to force-quit"))
-	} else {
-		if m.onSkip != nil {
-			parts = append(parts, styleKeyCap.Render("s")+" "+styleHelp.Render("skip item"))
-		}
-		parts = append(parts, styleKeyCap.Render("q")+" "+styleHelp.Render("stop & save"))
-		parts = append(parts, styleKeyCap.Render("⌃C")+" "+styleHelp.Render("abort"))
+// keymap declares every active key binding for the TUI footer using
+// bubbles/key.  The struct implements help.KeyMap so bubbles/help can
+// render the bindings into a single help line.  The key.Help.Key text is
+// pre-styled with the carrier keycap pill so help.View produces the same
+// "rounded cap + label" aesthetic the renderer used to hand-roll.
+type keymap struct {
+	Skip  key.Binding
+	Stop  key.Binding
+	Abort key.Binding
+}
+
+// ShortHelp is bubbles/help's short-form contract.  Order = render order.
+func (k keymap) ShortHelp() []key.Binding {
+	bs := []key.Binding{}
+	if k.Skip.Enabled() {
+		bs = append(bs, k.Skip)
 	}
-	return "  " + strings.Join(parts, styleHelp.Render("   "))
+	bs = append(bs, k.Stop, k.Abort)
+	return bs
+}
+
+// FullHelp returns the same set; we don't render a separate full help.
+func (k keymap) FullHelp() [][]key.Binding { return [][]key.Binding{k.ShortHelp()} }
+
+// helpModel is a package-level help.Model with carrier-themed styles.
+// Styling the ShortKey with the keycap background reproduces the original
+// bespoke pill design while letting bubbles/help own the layout.
+var helpModel = func() help.Model {
+	h := help.New()
+	keyCap := lipgloss.NewStyle().
+		Foreground(colorFrost).
+		Background(colorSlate).
+		Bold(true).
+		Padding(0, 1)
+	h.Styles.ShortKey = keyCap
+	h.Styles.ShortDesc = lipgloss.NewStyle().Foreground(colorMuted)
+	h.Styles.ShortSeparator = lipgloss.NewStyle().Foreground(colorMuted).
+		SetString("   ")
+	h.Styles.FullKey = keyCap
+	h.Styles.FullDesc = lipgloss.NewStyle().Foreground(colorMuted)
+	h.Styles.FullSeparator = lipgloss.NewStyle().Foreground(colorMuted).
+		SetString("   ")
+	return h
+}()
+
+// renderFooter renders the bottom help bar via bubbles/help against the
+// model's keymap.  In stopping mode we override with a single force-quit
+// hint so users discover the second-press behaviour.
+func (m tuiModel) renderFooter() string {
+	if m.stopping {
+		return "  " + styleHelp.Render("press ") +
+			styleKeyCap.Render("q") +
+			styleHelp.Render(" again to force-quit")
+	}
+	km := keymap{
+		Skip: key.NewBinding(
+			key.WithKeys("s", "S"),
+			key.WithHelp("s", "skip item"),
+			key.WithDisabled(),
+		),
+		Stop: key.NewBinding(
+			key.WithKeys("q", "Q"),
+			key.WithHelp("q", "stop & save"),
+		),
+		Abort: key.NewBinding(
+			key.WithKeys("ctrl+c"),
+			key.WithHelp("⌃C", "abort"),
+		),
+	}
+	if m.onSkip != nil {
+		km.Skip.SetEnabled(true)
+	}
+	return "  " + helpModel.View(km)
 }
 
 // maxInt returns the larger of a, b.  Tiny helper for sep-width math.
@@ -1682,10 +1748,14 @@ func formatDuration(d time.Duration) string {
 
 // ── Console logging ───────────────────────────────────────────────────────────
 
+// Stdout / Stderr — direct os handles.  termenv (used by lipgloss) detects
+// the active output's capabilities and writes appropriate ANSI sequences,
+// including on modern Windows terminals (10+, 2019+) which support
+// VT processing natively.  go-colorable is no longer required.
 var (
-	Stdout    = colorable.NewColorableStdout()
-	Stderr    = colorable.NewColorableStderr()
-	DefaultUI = Console{Stdout: Stdout, Stderr: Stderr}
+	Stdout    io.Writer = os.Stdout
+	Stderr    io.Writer = os.Stderr
+	DefaultUI           = Console{Stdout: Stdout, Stderr: Stderr}
 
 	// Log is the global structured console logger used when the TUI is inactive.
 	// It uses charmbracelet/log with custom lipgloss styles matching the TUI palette.
@@ -1891,9 +1961,16 @@ func RunWithTUI(opts RunOptions, fn func() error) error {
 			}()
 			fnErr = fn()
 		}()
+		// Library code shouldn't terminate the process — surface the TUI
+		// error to the caller (main) which decides the exit code.
 		if _, err := p.Run(); err != nil {
-			fmt.Fprintln(os.Stderr, "TUI error:", err)
-			os.Exit(1)
+			Program = nil
+			close(stopWatch)
+			<-fnDone
+			if fnErr != nil {
+				return fmt.Errorf("tui: %w (download error: %v)", err, fnErr)
+			}
+			return fmt.Errorf("tui: %w", err)
 		}
 		Program = nil
 		close(stopWatch)
@@ -1957,97 +2034,78 @@ func ConfirmRedownload(filename string) bool {
 	return proceed
 }
 
-// PrintHelp renders a styled --help screen to stdout.
+const helpMarkdown = "" +
+	"# hget\n" +
+	"\n" +
+	"_carrier signal · multi-stream telemetry · resumable_\n" +
+	"\n" +
+	"## Usage\n" +
+	"\n" +
+	"```\n" +
+	"hget [options] <url>\n" +
+	"hget [options] --resume=<task-name>\n" +
+	"hget --file=<urls-file> [options]\n" +
+	"```\n" +
+	"\n" +
+	"## Options\n" +
+	"\n" +
+	"| Flag                | Description                                            | Default     |\n" +
+	"| ------------------- | ------------------------------------------------------ | ----------- |\n" +
+	"| `-n <int>`          | number of parallel connections                         | _# of CPUs_ |\n" +
+	"| `--skip-tls`        | skip TLS certificate verification                      | `false`     |\n" +
+	"| `--proxy <addr>`    | proxy (`socks5: host:port` or `http://host:port`)      |             |\n" +
+	"| `--file <path>`     | path to a file containing one URL per line             |             |\n" +
+	"| `--rate <limit>`    | bandwidth cap per download (e.g. `10kB`, `5MiB`)       |             |\n" +
+	"| `--resume <task>`   | resume a stopped download by task name or URL          |             |\n" +
+	"| `--probe <url>`     | probe URL for range support & content-length only      |             |\n" +
+	"| `--timeout <dur>`   | timeout waiting for response headers (e.g. `30s`)      | `15s`       |\n" +
+	"| `--verify`          | download & GPG-verify the `.sig` signature file        | `false`     |\n" +
+	"\n" +
+	"## Examples\n" +
+	"\n" +
+	"```bash\n" +
+	"# basic download\n" +
+	"hget https://example.com/file.iso\n" +
+	"\n" +
+	"# 8 connections, 5 MiB/s cap\n" +
+	"hget -n 8 --rate 5MiB https://example.com/large.tar.gz\n" +
+	"\n" +
+	"# resume an interrupted download\n" +
+	"hget --resume https://example.com/file.iso\n" +
+	"\n" +
+	"# batch download from a file\n" +
+	"hget --file urls.txt\n" +
+	"\n" +
+	"# probe server without downloading\n" +
+	"hget --probe https://example.com/file.iso\n" +
+	"\n" +
+	"# download & verify GPG signature\n" +
+	"hget --verify https://example.com/file.iso\n" +
+	"```\n"
+
 func PrintHelp() {
-	// ── Banner ────────────────────────────────────────────────────────────────
+	// ── Banner (unchanged ANSI wordmark) ─────────────────────────────────
 	fmt.Fprintln(Stdout, styleBanner.Render(banner))
 	fmt.Fprintln(Stdout, lipgloss.NewStyle().Foreground(colorSteel).Render(bannerStrap))
 	fmt.Fprintln(Stdout, lipgloss.NewStyle().Foreground(colorPhosphor).Render(strings.Repeat("═", 68)))
 	fmt.Fprintln(Stdout)
 
-	w := 68 // fixed help width
-	sep := styleSep.Render(strings.Repeat("┄", w))
-
-	// ── Shared style helpers ──────────────────────────────────────────────────
-	sectionHeader := lipgloss.NewStyle().
-		Foreground(colorPurple).
-		Bold(true).
-		MarginLeft(2)
-
-	flagName := lipgloss.NewStyle().
-		Foreground(colorCyan).
-		Bold(true).
-		Width(20)
-
-	flagDesc := lipgloss.NewStyle().
-		Foreground(colorWhite)
-
-	flagDefault := lipgloss.NewStyle().
-		Foreground(colorMuted)
-
-	usageLine := lipgloss.NewStyle().
-		Foreground(colorGreen).
-		MarginLeft(4)
-
-	exampleLine := lipgloss.NewStyle().
-		Foreground(colorCyan).
-		MarginLeft(4)
-
-	commentLine := lipgloss.NewStyle().
-		Foreground(colorMuted).
-		MarginLeft(4)
-
-	// ── Usage ────────────────────────────────────────────────────────────────
-	fmt.Fprintln(Stdout, sectionHeader.Render("USAGE"))
-	fmt.Fprintln(Stdout, usageLine.Render("hget [options] <url>"))
-	fmt.Fprintln(Stdout, usageLine.Render("hget [options] --resume=<task-name>"))
-	fmt.Fprintln(Stdout, usageLine.Render("hget --file=<urls-file> [options]"))
-	fmt.Fprintln(Stdout)
-	fmt.Fprintln(Stdout, sep)
-	fmt.Fprintln(Stdout)
-
-	// ── Options ───────────────────────────────────────────────────────────────
-	type opt struct{ flag, desc, def string }
-	options := []opt{
-		{"-n <int>", "number of parallel connections", "# of CPUs"},
-		{"--skip-tls", "skip TLS certificate verification", "false"},
-		{"--proxy <addr>", "proxy  (socks5: host:port  |  http: http://host:port)", ""},
-		{"--file <path>", "path to a file containing one URL per line", ""},
-		{"--rate <limit>", "bandwidth cap per download  (e.g. 10kB, 5MiB)", ""},
-		{"--resume <task>", "resume a stopped download by task name or URL", ""},
-		{"--probe <url>", "probe URL for range support & content-length only", ""},
-		{"--timeout <dur>", "timeout waiting for response headers  (e.g. 30s, 1m)", "15s"},
-		{"--verify", "download & GPG-verify the .sig signature file", "false"},
+	r, err := glamour.NewTermRenderer(
+		glamour.WithAutoStyle(),
+		glamour.WithWordWrap(72),
+	)
+	if err != nil {
+		// Fallback: print raw markdown when glamour can't init (no TTY,
+		// missing chroma styles, etc.) — still readable.
+		fmt.Fprint(Stdout, helpMarkdown)
+		return
 	}
-
-	fmt.Fprintln(Stdout, sectionHeader.Render("OPTIONS"))
-	for _, o := range options {
-		line := "  " + flagName.Render(o.flag) + "  " + flagDesc.Render(o.desc)
-		if o.def != "" {
-			line += "  " + flagDefault.Render("(default: "+o.def+")")
-		}
-		fmt.Fprintln(Stdout, line)
+	out, err := r.Render(helpMarkdown)
+	if err != nil {
+		fmt.Fprint(Stdout, helpMarkdown)
+		return
 	}
-	fmt.Fprintln(Stdout)
-	fmt.Fprintln(Stdout, sep)
-	fmt.Fprintln(Stdout)
-
-	// ── Examples ─────────────────────────────────────────────────────────────
-	fmt.Fprintln(Stdout, sectionHeader.Render("EXAMPLES"))
-
-	examples := []struct{ comment, cmd string }{
-		{"basic download", "hget https://example.com/file.iso"},
-		{"8 connections, 5 MiB/s cap", "hget -n 8 --rate 5MiB https://example.com/large.tar.gz"},
-		{"resume an interrupted download", "hget --resume https://example.com/file.iso"},
-		{"batch download from a file", "hget --file urls.txt"},
-		{"probe server without downloading", "hget --probe https://example.com/file.iso"},
-		{"download & verify GPG signature", "hget --verify https://example.com/file.iso"},
-	}
-	for _, e := range examples {
-		fmt.Fprintln(Stdout, commentLine.Render("# "+e.comment))
-		fmt.Fprintln(Stdout, exampleLine.Render(e.cmd))
-		fmt.Fprintln(Stdout)
-	}
+	fmt.Fprint(Stdout, out)
 }
 
 // PrintVerifySummary writes a styled one-line verify result to the terminal

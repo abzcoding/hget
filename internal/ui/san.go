@@ -218,14 +218,14 @@ func (s san) View() string {
 // composeCabinet wraps the bay grid in a full storage-array chassis with
 // brand strap, vent rows, and status footer.
 func (s san) composeCabinet(rowBlocks []string, gridW int, indicator string) string {
-	chrome := lipgloss.NewStyle().Foreground(colorPhosphor)
-	frame := lipgloss.NewStyle().Foreground(colorSlate)
-	steel := lipgloss.NewStyle().Foreground(colorSteel)
-	frost := lipgloss.NewStyle().Foreground(colorFrost).Bold(true)
-	brand := lipgloss.NewStyle().Foreground(colorAmber).Bold(true)
-	mint := lipgloss.NewStyle().Foreground(colorMint).Bold(true)
-	mag := lipgloss.NewStyle().Foreground(colorMagenta).Bold(true)
-	amber := lipgloss.NewStyle().Foreground(colorAmber).Bold(true)
+	chrome := fgStyle(colorPhosphor)
+	frame := fgStyle(colorSlate)
+	steel := fgStyle(colorSteel)
+	frost := fgBoldStyle(colorFrost)
+	brand := fgBoldStyle(colorAmber)
+	mint := fgBoldStyle(colorMint)
+	mag := fgBoldStyle(colorMagenta)
+	amber := fgBoldStyle(colorAmber)
 
 	// Inner cabinet width.  No extra padding around the grid: the bays
 	// fill the chassis flush so total width matches tapeBannerWidth (72)
@@ -383,13 +383,13 @@ func (s san) composeCompact(rowBlocks []string, gridW int, indicator string) str
 }
 
 func (s san) renderBay(it sanItem, isActive bool) []string {
-	chromeC := lipgloss.NewStyle().Foreground(colorSlate)
-	frameC := lipgloss.NewStyle().Foreground(colorSteel)
-	steel := lipgloss.NewStyle().Foreground(colorSteel)
-	frost := lipgloss.NewStyle().Foreground(colorFrost).Bold(true)
-	amber := lipgloss.NewStyle().Foreground(colorAmber).Bold(true)
-	mint := lipgloss.NewStyle().Foreground(colorMint).Bold(true)
-	mag := lipgloss.NewStyle().Foreground(colorMagenta).Bold(true)
+	chromeC := fgStyle(colorSlate)
+	frameC := fgStyle(colorSteel)
+	steel := fgStyle(colorSteel)
+	frost := fgBoldStyle(colorFrost)
+	amber := fgBoldStyle(colorAmber)
+	mint := fgBoldStyle(colorMint)
+	mag := fgBoldStyle(colorMagenta)
 
 	// State-driven palette + reel/LED.
 	var reelCol, fillCol, ledCol, accent lipgloss.Color
@@ -452,8 +452,8 @@ func (s san) renderBay(it sanItem, isActive bool) []string {
 		return seq[idx]
 	}
 
-	hubL := lipgloss.NewStyle().Foreground(reelCol).Bold(true).Render(hubGlyph(false))
-	hubR := lipgloss.NewStyle().Foreground(reelCol).Bold(true).Render(hubGlyph(true))
+	hubL := fgBoldStyle(reelCol).Render(hubGlyph(false))
+	hubR := fgBoldStyle(reelCol).Render(hubGlyph(true))
 
 	pad := func(s string, w int) string {
 		gap := w - lipgloss.Width(s)
@@ -484,10 +484,10 @@ func (s san) renderBay(it sanItem, isActive bool) []string {
 		plateLabelMax = 1
 	}
 	plateLabel := truncateLabel(it.Label, plateLabelMax)
-	plateStyled := lipgloss.NewStyle().Foreground(accent).Render("[") +
-		lipgloss.NewStyle().Foreground(colorFrost).Bold(true).Render(plateLabel) +
+	plateStyled := fgStyle(accent).Render("[") +
+		fgBoldStyle(colorFrost).Render(plateLabel) +
 		" " + statusSty.Render(statusGlyph) +
-		lipgloss.NewStyle().Foreground(accent).Render("]")
+		fgStyle(accent).Render("]")
 	plateW := lipgloss.Width(plateStyled)
 	rightDash := innerW - dashLeft - plateW
 	if rightDash < 0 {
@@ -517,8 +517,8 @@ func (s san) renderBay(it sanItem, isActive bool) []string {
 	if filled > barW {
 		filled = barW
 	}
-	on := lipgloss.NewStyle().Foreground(fillCol).Bold(true)
-	off := lipgloss.NewStyle().Foreground(colorSlate)
+	on := fgBoldStyle(fillCol)
+	off := fgStyle(colorSlate)
 	bar := on.Render(strings.Repeat("▓", filled)) +
 		off.Render(strings.Repeat("░", barW-filled))
 	pctStr := fmt.Sprintf("%3d%%", int(math.Round(progress*100)))
@@ -533,7 +533,7 @@ func (s san) renderBay(it sanItem, isActive bool) []string {
 	if ledOn {
 		ledRune = "●"
 	}
-	led := lipgloss.NewStyle().Foreground(ledCol).Bold(true).Render(ledRune)
+	led := fgBoldStyle(ledCol).Render(ledRune)
 	r5content := " " + led + " " + statusSty.Render(statusTxt)
 	r5 := chromeC.Render("│") + pad(r5content, innerW) + chromeC.Render("│")
 
@@ -582,8 +582,8 @@ func (s san) windowItems(maxBays int) (int, int) {
 }
 
 func sanWindowIndicator(start, end, total, width int) string {
-	steel := lipgloss.NewStyle().Foreground(colorSteel)
-	amber := lipgloss.NewStyle().Foreground(colorAmber).Bold(true)
+	steel := fgStyle(colorSteel)
+	amber := fgBoldStyle(colorAmber)
 	left := ""
 	right := ""
 	if start > 0 {

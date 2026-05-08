@@ -88,20 +88,79 @@ func TestJoinAnimation(t *testing.T) {
 	}
 }
 
-// TestVerifyAnimation demonstrates the GPG verification animation.
+// TestVerifyAnimation demonstrates the GPG verification vault panel
+// across all three operational modes (scanning, verified, breached).
 func TestVerifyAnimation(t *testing.T) {
 	if testing.Short() {
 		t.Skip("visual demo")
 	}
 
-	verify := newVerifyAnimation()
+	// ── Scanning mode (animated) ──────────────────────────────────────────
+	scan := newVerifyAnimation()
+	fmt.Println("\n─── Vault: scanning ───")
+	for i := 0; i < 25; i++ {
+		scan.Tick()
+	}
+	fmt.Println(scan.View())
 
-	fmt.Println("\n─── Verifying GPG Signature ───")
+	// ── Verified mode (parsed details) ────────────────────────────────────
+	good := newVerifyAnimation()
+	for i := 0; i < 30; i++ {
+		good.Tick()
+	}
+	good.SetVerified(ParseGPGOutput(`gpg: Signature made Mon Jan  1 12:00:00 2024 UTC
+gpg:                using RSA key ABCDEF1234567890ABCDEF1234567890DEADBEEF
+gpg: Good signature from "Linus Torvalds <torvalds@kernel.org>" [unknown]
+Primary key fingerprint: ABCD 1234 EF56 7890 ABCD  1234 EF56 7890 DEAD BEEF`))
+	for i := 0; i < 5; i++ {
+		good.Tick()
+	}
+	fmt.Println("\n─── Vault: verified ───")
+	fmt.Println(good.View())
 
-	// Show animation over several frames
-	for i := 0; i < 20; i++ {
-		verify.Tick()
+	// ── Breached mode ─────────────────────────────────────────────────────
+	bad := newVerifyAnimation()
+	bad.SetBreached(ParseGPGOutput(`gpg: Signature made Mon Jan  1 12:00:00 2024 UTC
+gpg:                using RSA key DEADBEEFCAFEBABE
+gpg: BAD signature from "Mallory <mallory@example.com>"`))
+	for i := 0; i < 5; i++ {
+		bad.Tick()
+	}
+	fmt.Println("\n─── Vault: breached ───")
+	fmt.Println(bad.View())
+}
+
+// TestParseGPGOutput exercises the GPG-output parser for a few common
+// shapes so the vault panel can rely on structured fields.
+func TestParseGPGOutput(t *testing.T) {
+	good := `gpg: Signature made Mon Jan 01 12:00:00 2024 UTC
+gpg:                using RSA key 0123456789ABCDEF0123456789ABCDEF01234567
+gpg: Good signature from "Alice <alice@example.com>" [unknown]
+Primary key fingerprint: 0123 4567 89AB CDEF 0123  4567 89AB CDEF 0123 4567`
+	d := ParseGPGOutput(good)
+	if d.SignedBy != "Alice <alice@example.com>" {
+		t.Errorf("SignedBy = %q", d.SignedBy)
+	}
+	if d.Verdict != "GOOD SIGNATURE" {
+		t.Errorf("Verdict = %q", d.Verdict)
+	}
+	if d.KeyID == "" {
+		t.Errorf("KeyID empty")
+	}
+	if d.Fingerprint == "" {
+		t.Errorf("Fingerprint empty")
+	}
+	if d.SignedAt == "" {
+		t.Errorf("SignedAt empty")
 	}
 
-	fmt.Println(verify.View())
+	bad := `gpg: BAD signature from "Eve"`
+	if got := ParseGPGOutput(bad).Verdict; got != "BAD SIGNATURE" {
+		t.Errorf("bad verdict = %q", got)
+	}
+
+	missing := `gpg: Can't check signature: No public key`
+	if got := ParseGPGOutput(missing).Verdict; got != "PUBLIC KEY MISSING" {
+		t.Errorf("missing verdict = %q", got)
+	}
 }

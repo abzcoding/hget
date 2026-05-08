@@ -1,17 +1,43 @@
 package ui
 
-
 import (
 	cryptorand "crypto/rand"
 	"encoding/binary"
 	"fmt"
 	"math"
 	"math/rand"
+	"sync"
 	"strings"
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
 )
+
+
+var (
+	fgStyleCache     sync.Map // lipgloss.Color → lipgloss.Style
+	fgBoldStyleCache sync.Map // lipgloss.Color → lipgloss.Style (bold)
+)
+
+// fgStyle returns a Foreground-only style cached by colour.
+func fgStyle(c lipgloss.Color) lipgloss.Style {
+	if v, ok := fgStyleCache.Load(c); ok {
+		return v.(lipgloss.Style)
+	}
+	s := lipgloss.NewStyle().Foreground(c)
+	fgStyleCache.Store(c, s)
+	return s
+}
+
+// fgBoldStyle returns a Foreground+Bold style cached by colour.
+func fgBoldStyle(c lipgloss.Color) lipgloss.Style {
+	if v, ok := fgBoldStyleCache.Load(c); ok {
+		return v.(lipgloss.Style)
+	}
+	s := lipgloss.NewStyle().Foreground(c).Bold(true)
+	fgBoldStyleCache.Store(c, s)
+	return s
+}
 
 // ── LEDs ──────────────────────────────────────────────────────────────────────
 
@@ -38,11 +64,11 @@ func (l *led) ignite(target float64) {
 func (l led) render(activeColor, dimColor lipgloss.Color) string {
 	switch {
 	case l.brightness >= 0.7:
-		return lipgloss.NewStyle().Foreground(activeColor).Bold(true).Render("●")
+		return fgBoldStyle(activeColor).Render("●")
 	case l.brightness >= 0.25:
-		return lipgloss.NewStyle().Foreground(activeColor).Render("●")
+		return fgStyle(activeColor).Render("●")
 	default:
-		return lipgloss.NewStyle().Foreground(dimColor).Render("●")
+		return fgStyle(dimColor).Render("●")
 	}
 }
 
@@ -169,7 +195,7 @@ func (d *dataLink) View(
 	carrier bool,
 ) string {
 	// ── shell ─────────────────────────────────────────────────────────────
-	shellStyle := lipgloss.NewStyle().Foreground(colorPhosphor)
+	shellStyle := fgStyle(colorPhosphor)
 	railStyle := styleSep
 
 	// Status-specific LED patterns and colors
@@ -250,9 +276,9 @@ func (d *dataLink) View(
 		statusColor = colorPhosphor
 	}
 
-	headerLabel := lipgloss.NewStyle().Foreground(colorPhosphor).Bold(true).Render("▣ HGET")
-	headerKind := lipgloss.NewStyle().Foreground(colorSteel).Render(" · DATA LINK · ")
-	headerStatus := lipgloss.NewStyle().Foreground(statusColor).Bold(true).Render(strings.ToUpper(status))
+	headerLabel := fgBoldStyle(colorPhosphor).Render("▣ HGET")
+	headerKind := fgStyle(colorSteel).Render(" · DATA LINK · ")
+	headerStatus := fgBoldStyle(statusColor).Render(strings.ToUpper(status))
 	headerInner := headerLabel + headerKind + headerStatus
 	headerInnerW := lipgloss.Width(headerInner)
 	dashesAvail := dataLinkInnerW - headerInnerW - 4 // account for "─ " bookends + side rails-aware padding
@@ -291,7 +317,7 @@ func (d *dataLink) View(
 
 	// ── LED row ───────────────────────────────────────────────────────────
 	ledLabel := func(name string, l led, on, off lipgloss.Color) string {
-		lab := lipgloss.NewStyle().Foreground(colorSteel).Render(name)
+		lab := fgStyle(colorSteel).Render(name)
 		return lab + " " + l.render(on, off)
 	}
 	ledRow := strings.Join([]string{
@@ -336,15 +362,15 @@ func (d *dataLink) View(
 //
 //	▸ CH·01  ┃▰▰▰▰▰▰▰▰▰▰▰▱▱▱▱▱▱▱▱▱▱▱┃   72.3%    ↓ 1.2 MB/s   ●●
 func (d *dataLink) renderChannelRow(ch channelRow, idx int, status string) string {
-	bullet := lipgloss.NewStyle().Foreground(colorAmber).Render("▸")
-	label := lipgloss.NewStyle().Foreground(colorSteel).Render(fmt.Sprintf("CH·%02d", ch.Index+1))
+	bullet := fgStyle(colorAmber).Render("▸")
+	label := fgStyle(colorSteel).Render(fmt.Sprintf("CH·%02d", ch.Index+1))
 
 	// Bar.
 	bar := renderChannelBar(ch.Pct, ch.Done)
 
 	pct := math.Max(0, math.Min(ch.RawPct, 1.0))
 	pctTxt := fmt.Sprintf("%5.1f%%", pct*100)
-	pctStyled := lipgloss.NewStyle().Foreground(colorFrost).Render(pctTxt)
+	pctStyled := fgStyle(colorFrost).Render(pctTxt)
 
 	// Render speed in a fixed 13-cell column so activity LEDs always align.
 	const speedW = 13
@@ -358,9 +384,9 @@ func (d *dataLink) renderChannelRow(ch channelRow, idx int, status string) strin
 	var speedTxt string
 	switch {
 	case ch.Done:
-		speedTxt = pad(lipgloss.NewStyle().Foreground(colorMint).Bold(true).Render("done"), speedW)
+		speedTxt = pad(fgBoldStyle(colorMint).Render("done"), speedW)
 	case ch.Speed > 0:
-		speedTxt = pad(lipgloss.NewStyle().Foreground(colorAmber).Render(formatSpeed(ch.Speed)), speedW)
+		speedTxt = pad(fgStyle(colorAmber).Render(formatSpeed(ch.Speed)), speedW)
 	default:
 		speedTxt = strings.Repeat(" ", speedW)
 	}
@@ -378,13 +404,13 @@ func (d *dataLink) renderChannelRow(ch channelRow, idx int, status string) strin
 		act = d.chanLEDs[idx][0].render(ledColor, colorSlate) +
 			d.chanLEDs[idx][1].render(ledColor, colorSlate)
 	} else {
-		act = lipgloss.NewStyle().Foreground(colorSlate).Render("●●")
+		act = fgStyle(colorSlate).Render("●●")
 	}
 
 	return "  " + bullet + " " + label + "  " +
-		lipgloss.NewStyle().Foreground(colorPhosphor).Render("┃") +
+		fgStyle(colorPhosphor).Render("┃") +
 		bar +
-		lipgloss.NewStyle().Foreground(colorPhosphor).Render("┃") +
+		fgStyle(colorPhosphor).Render("┃") +
 		"  " + pctStyled + "   " + speedTxt + "   " + act
 }
 
@@ -398,17 +424,17 @@ func (d *dataLink) renderAggregate(totalDown, size int64, peak float64, elapsed 
 		pct = math.Min(float64(totalDown)/float64(size), 1.0)
 	}
 
-	bullet := lipgloss.NewStyle().Foreground(colorAmber).Bold(true).Render("◆")
-	label := lipgloss.NewStyle().Foreground(colorAmber).Bold(true).Render("LINK ")
+	bullet := fgBoldStyle(colorAmber).Render("◆")
+	label := fgBoldStyle(colorAmber).Render("LINK ")
 	bar := renderAggregateBar(pct)
 
-	pctTxt := lipgloss.NewStyle().Foreground(colorFrost).Bold(true).
+	pctTxt := fgBoldStyle(colorFrost).
 		Render(fmt.Sprintf("%5.1f%%", pct*100))
 
 	row1 := "  " + bullet + " " + label + "  " +
-		lipgloss.NewStyle().Foreground(colorPhosphor).Render("┃") +
+		fgStyle(colorPhosphor).Render("┃") +
 		bar +
-		lipgloss.NewStyle().Foreground(colorPhosphor).Render("┃") +
+		fgStyle(colorPhosphor).Render("┃") +
 		"  " + pctTxt
 
 	// Stats line (ETA, current rate, peak).
@@ -418,21 +444,21 @@ func (d *dataLink) renderAggregate(totalDown, size int64, peak float64, elapsed 
 	}
 	parts := []string{}
 	if currentSpeed > 0 {
-		parts = append(parts, lipgloss.NewStyle().Foreground(colorAmber).Bold(true).
+		parts = append(parts, fgBoldStyle(colorAmber).
 			Render(formatSpeed(currentSpeed)))
 	}
 	if pct > 0.001 && size > 0 {
 		eta := elapsed.Seconds()/pct - elapsed.Seconds()
 		if eta > 0 {
-			parts = append(parts, lipgloss.NewStyle().Foreground(colorSteel).Render("ETA ")+
-				lipgloss.NewStyle().Foreground(colorPhosphor).Render(formatDuration(time.Duration(eta*float64(time.Second)))))
+			parts = append(parts, fgStyle(colorSteel).Render("ETA ")+
+				fgStyle(colorPhosphor).Render(formatDuration(time.Duration(eta*float64(time.Second)))))
 		}
 	}
 	if peak > 0 {
-		parts = append(parts, lipgloss.NewStyle().Foreground(colorSteel).Render("peak ")+
-			lipgloss.NewStyle().Foreground(colorPhosphor).Render(formatSpeed(peak)))
+		parts = append(parts, fgStyle(colorSteel).Render("peak ")+
+			fgStyle(colorPhosphor).Render(formatSpeed(peak)))
 	}
-	row2 := strings.Repeat(" ", 12) + strings.Join(parts, lipgloss.NewStyle().Foreground(colorSlate).Render("   ·   "))
+	row2 := strings.Repeat(" ", 12) + strings.Join(parts, fgStyle(colorSlate).Render("   ·   "))
 	return []string{row1, row2}
 }
 
@@ -448,10 +474,10 @@ func renderChannelBar(pct float64, done bool) string {
 	if filled > channelBarCells {
 		filled = channelBarCells
 	}
-	on := lipgloss.NewStyle().Foreground(colorPhosphor)
-	off := lipgloss.NewStyle().Foreground(colorSlate)
+	on := fgStyle(colorPhosphor)
+	off := fgStyle(colorSlate)
 	if done {
-		on = lipgloss.NewStyle().Foreground(colorMint)
+		on = fgStyle(colorMint)
 	}
 	return on.Render(strings.Repeat("▰", filled)) +
 		off.Render(strings.Repeat("▱", channelBarCells-filled))
@@ -476,10 +502,10 @@ func renderAggregateBar(pct float64) string {
 	if threshold < 0 {
 		threshold = 0
 	}
-	body += lipgloss.NewStyle().Foreground(colorPhosphor).Render(strings.Repeat("▰", threshold))
+	body += fgStyle(colorPhosphor).Render(strings.Repeat("▰", threshold))
 	if filled > threshold {
-		body += lipgloss.NewStyle().Foreground(colorAmber).Bold(true).Render(strings.Repeat("▰", filled-threshold))
+		body += fgBoldStyle(colorAmber).Render(strings.Repeat("▰", filled-threshold))
 	}
-	body += lipgloss.NewStyle().Foreground(colorSlate).Render(strings.Repeat("▱", aggBarCells-filled))
+	body += fgStyle(colorSlate).Render(strings.Repeat("▱", aggBarCells-filled))
 	return body
 }

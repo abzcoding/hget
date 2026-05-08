@@ -41,12 +41,12 @@ func (m *modemHandshake) Tick() {
 }
 
 func (m modemHandshake) View(url string) string {
-	steel := lipgloss.NewStyle().Foreground(colorSteel)
-	frost := lipgloss.NewStyle().Foreground(colorFrost).Bold(true)
-	amber := lipgloss.NewStyle().Foreground(colorAmber).Bold(true)
-	mint := lipgloss.NewStyle().Foreground(colorMint).Bold(true)
-	chrome := lipgloss.NewStyle().Foreground(colorPhosphor)
-	frame := lipgloss.NewStyle().Foreground(colorSlate)
+	steel := fgStyle(colorSteel)
+	frost := fgBoldStyle(colorFrost)
+	amber := fgBoldStyle(colorAmber)
+	mint := fgBoldStyle(colorMint)
+	chrome := fgStyle(colorPhosphor)
+	frame := fgStyle(colorSlate)
 
 	// ── Build mainframe centered to total width. ─────────────────────────
 	w := m.width
@@ -106,7 +106,7 @@ func (m modemHandshake) View(url string) string {
 	case 3:
 		bannerColor, status = colorMint, "LINK ESTABLISHED"
 	}
-	bannerSty := lipgloss.NewStyle().Foreground(bannerColor).Bold(true)
+	bannerSty := fgBoldStyle(bannerColor)
 	caption := bannerSty.Render("◆ "+status) +
 		steel.Render("  · target ") +
 		frost.Render(truncateURL(url, 64))
@@ -135,12 +135,12 @@ func (m modemHandshake) View(url string) string {
 }
 
 func (m modemHandshake) renderModem() string {
-	chrome := lipgloss.NewStyle().Foreground(colorPhosphor)
-	frame := lipgloss.NewStyle().Foreground(colorSlate)
-	steel := lipgloss.NewStyle().Foreground(colorSteel)
-	frost := lipgloss.NewStyle().Foreground(colorFrost).Bold(true)
-	brand := lipgloss.NewStyle().Foreground(colorAmber).Bold(true)
-	amber := lipgloss.NewStyle().Foreground(colorAmber).Bold(true)
+	chrome := fgStyle(colorPhosphor)
+	frame := fgStyle(colorSlate)
+	steel := fgStyle(colorSteel)
+	frost := fgBoldStyle(colorFrost)
+	brand := fgBoldStyle(colorAmber)
+	amber := fgBoldStyle(colorAmber)
 
 	// LED palette per phase.
 	ledOn := func(on bool, accent lipgloss.Color) string {
@@ -148,7 +148,7 @@ func (m modemHandshake) renderModem() string {
 		if on {
 			col = accent
 		}
-		return lipgloss.NewStyle().Foreground(col).Bold(true).Render("◉")
+		return fgBoldStyle(col).Render("◉")
 	}
 
 	// Phase-driven LED pattern.  Hayes panel LEDs:
@@ -318,8 +318,8 @@ func (m modemHandshake) renderModem() string {
 		dialA = amber.Render(dialChars[idx])
 		dialB = amber.Render(dialChars[(idx+2)%4])
 	case m.phase >= 2:
-		dialA = lipgloss.NewStyle().Foreground(colorMint).Bold(true).Render("◉")
-		dialB = lipgloss.NewStyle().Foreground(colorMint).Bold(true).Render("◉")
+		dialA = fgBoldStyle(colorMint).Render("◉")
+		dialB = fgBoldStyle(colorMint).Render("◉")
 	default:
 		dialA = steel.Render("·")
 		dialB = steel.Render("·")
@@ -381,11 +381,11 @@ func (m modemHandshake) renderPhoneLine(rows, width, mfCol, modemCol int) []stri
 		modemCol = width - 1
 	}
 
-	steel := lipgloss.NewStyle().Foreground(colorSteel)
-	chromeOn := lipgloss.NewStyle().Foreground(colorPhosphor)
-	chromeDim := lipgloss.NewStyle().Foreground(colorSlate)
-	amber := lipgloss.NewStyle().Foreground(colorAmber).Bold(true)
-	mint := lipgloss.NewStyle().Foreground(colorMint).Bold(true)
+	steel := fgStyle(colorSteel)
+	chromeOn := fgStyle(colorPhosphor)
+	chromeDim := fgStyle(colorSlate)
+	amber := fgBoldStyle(colorAmber)
+	mint := fgBoldStyle(colorMint)
 
 	// Pick palette per phase.
 	var trunkSty lipgloss.Style
@@ -393,7 +393,7 @@ func (m modemHandshake) renderPhoneLine(rows, width, mfCol, modemCol int) []stri
 	case 0:
 		trunkSty = chromeDim
 	case 1:
-		trunkSty = lipgloss.NewStyle().Foreground(colorAmber)
+		trunkSty = fgStyle(colorAmber)
 	case 2:
 		trunkSty = chromeOn
 	case 3:

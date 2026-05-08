@@ -27,14 +27,13 @@ func FilterIPV4(ips []net.IP) []string {
 	return ret
 }
 
-// MkdirIfNotExist creates `folder` directory if not available.
+// MkdirIfNotExist creates `folder` if it doesn't already exist.
+//
+// MkdirAll is idempotent and atomic, so we don't pre-stat — pre-stating opens
+// a TOCTOU window where a different process can create or replace the
+// directory between the check and the call.
 func MkdirIfNotExist(folder string) error {
-	if _, err := os.Stat(folder); err != nil {
-		if err = os.MkdirAll(folder, 0700); err != nil {
-			return err
-		}
-	}
-	return nil
+	return os.MkdirAll(folder, 0700)
 }
 
 // ExistDir checks if `folder` is available.
@@ -45,11 +44,24 @@ func ExistDir(folder string) bool {
 
 // TaskFromURL extracts the filename from a URL.
 // e.g. http://example.com/path/to/file?param=value -> file
+//
+// On parse failure (rare — url.Parse is very permissive) it falls back to the
+// basename of the raw input rather than panicking, so a single malformed entry
+// in a batch URL list cannot crash the whole process.
 func TaskFromURL(urlStr string) string {
 	parsedURL, err := url.Parse(urlStr)
-	FatalCheck(err)
-	cleanPath := filepath.Clean(parsedURL.Path)
-	return filepath.Base(strings.TrimRight(cleanPath, "/\\"))
+	var rawPath string
+	if err != nil || parsedURL == nil {
+		rawPath = urlStr
+	} else {
+		rawPath = parsedURL.Path
+	}
+	cleanPath := filepath.Clean(rawPath)
+	base := filepath.Base(strings.TrimRight(cleanPath, "/\\"))
+	if base == "." || base == "/" || base == "\\" || base == "" {
+		return "download"
+	}
+	return base
 }
 
 // IsURL checks if `s` is actually a parsable URL.

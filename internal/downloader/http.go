@@ -65,16 +65,19 @@ func (rlr *rateLimitedReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// NewHTTPDownloader returns a configured HTTPDownloader ready to download url.
-func NewHTTPDownloader(url string, par int, skipTLS bool, proxyServer string, bwLimit string, timeout time.Duration) *HTTPDownloader {
+func NewHTTPDownloader(url string, par int, skipTLS bool, proxyServer string, bwLimit string, timeout time.Duration) (*HTTPDownloader, error) {
 	var resumable = true
 	client := ProxyAwareHTTPClient(proxyServer, skipTLS, timeout)
 
 	parsed, err := stdurl.Parse(url)
-	util.FatalCheck(err)
+	if err != nil {
+		return nil, fmt.Errorf("parsing url %q: %w", url, err)
+	}
 
 	ips, err := net.LookupIP(parsed.Hostname())
-	util.FatalCheck(err)
+	if err != nil {
+		return nil, fmt.Errorf("resolving %s: %w", parsed.Hostname(), err)
+	}
 
 	ipstr := util.FilterIPV4(ips)
 
@@ -84,7 +87,9 @@ func NewHTTPDownloader(url string, par int, skipTLS bool, proxyServer string, bw
 
 	// HEAD probe
 	req, err := http.NewRequest("HEAD", url, nil)
-	util.FatalCheck(err)
+	if err != nil {
+		return nil, fmt.Errorf("building HEAD request: %w", err)
+	}
 	req.Header.Set("Accept", "*/*")
 	req.Header.Set("User-Agent", defaultUserAgent)
 	req.Header.Set("Accept-Encoding", "identity")
@@ -160,7 +165,11 @@ func NewHTTPDownloader(url string, par int, skipTLS bool, proxyServer string, bw
 	ret.len = lenValue
 	ret.ips = ipstr
 	ret.skipTLS = skipTLS
-	ret.parts = PartCalculate(int64(par), lenValue, url)
+	parts, err := PartCalculate(int64(par), lenValue, url)
+	if err != nil {
+		return nil, err
+	}
+	ret.parts = parts
 	ret.resumable = resumable
 	ret.proxy = proxyServer
 	ret.timeout = timeout
@@ -180,38 +189,50 @@ func NewHTTPDownloader(url string, par int, skipTLS bool, proxyServer string, bw
 		})
 	}
 
-	return ret
+	return ret, nil
 }
 
-// progressWriter tracks bytes written and forwards progress updates to the TUI.
 type progressWriter struct {
-	partIndex  int
-	downloaded int64
-	total      int64
-	writer     io.Writer
-	lastSent   time.Time
+	partIndex   int
+	downloaded  int64
+	total       int64
+	writer      io.Writer
+	lastSent    time.Time
+	bytesAtLast int64
 }
+
+const progressByteCheckInterval = 64 * 1024 // ~16 checks per MiB
 
 func (pw *progressWriter) Write(p []byte) (int, error) {
 	n, err := pw.writer.Write(p)
 	pw.downloaded += int64(n)
-	if ui.Program != nil {
-		now := time.Now()
-		if now.Sub(pw.lastSent) >= 80*time.Millisecond || pw.downloaded >= pw.total {
-			ui.Program.Send(ui.PartProgressMsg{
-				Index:      pw.partIndex,
-				Downloaded: pw.downloaded,
-				Total:      pw.total,
-			})
-			pw.lastSent = now
-		}
+	if ui.Program == nil {
+		return n, err
+	}
+	final := pw.total > 0 && pw.downloaded >= pw.total
+	if !final && pw.downloaded-pw.bytesAtLast < progressByteCheckInterval {
+		return n, err
+	}
+	now := time.Now()
+	if final || now.Sub(pw.lastSent) >= 80*time.Millisecond {
+		ui.Program.Send(ui.PartProgressMsg{
+			Index:      pw.partIndex,
+			Downloaded: pw.downloaded,
+			Total:      pw.total,
+		})
+		pw.lastSent = now
+		pw.bytesAtLast = pw.downloaded
 	}
 	return n, err
 }
 
-// PartCalculate splits the download into parts.
-func PartCalculate(par int64, length int64, url string) []state.Part {
+func PartCalculate(par int64, length int64, url string) ([]state.Part, error) {
 	ret := make([]state.Part, par)
+	folder := state.FolderOf(url)
+	if err := util.MkdirIfNotExist(folder); err != nil {
+		return nil, fmt.Errorf("creating download folder %s: %w", folder, err)
+	}
+	file := util.TaskFromURL(url)
 	for j := int64(0); j < par; j++ {
 		from := (length / par) * j
 		var to int64
@@ -220,21 +241,38 @@ func PartCalculate(par int64, length int64, url string) []state.Part {
 		} else {
 			to = length
 		}
-
-		file := util.TaskFromURL(url)
-
-		folder := state.FolderOf(url)
-		if err := util.MkdirIfNotExist(folder); err != nil {
-			ui.Errorf("%v", err)
-			os.Exit(1)
-		}
-
 		// Zero-pad part index so filenames sort lexicographically in order.
 		fname := fmt.Sprintf("%s.part%06d", file, j)
 		path := filepath.Join(folder, fname)
 		ret[j] = state.Part{Index: j, URL: url, Path: path, RangeFrom: from, RangeTo: to}
 	}
-	return ret
+	return ret, nil
+}
+
+func isPrivateHost(host string) bool {
+	if host == "" {
+		return false
+	}
+	check := func(ip net.IP) bool {
+		if ip == nil {
+			return false
+		}
+		return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
+			ip.IsLinkLocalMulticast() || ip.IsUnspecified()
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return check(ip)
+	}
+	ips, err := net.LookupIP(host)
+	if err != nil {
+		return false
+	}
+	for _, ip := range ips {
+		if check(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 // ProxyAwareHTTPClient returns an HTTP client that may use an HTTP or SOCKS5 proxy.
@@ -292,6 +330,9 @@ func ProxyAwareHTTPClient(proxyServer string, skipTLS bool, timeout time.Duratio
 		}
 		if len(via) >= 10 {
 			return errors.New("stopped after 10 redirects")
+		}
+		if isPrivateHost(req.URL.Hostname()) && !isPrivateHost(via[0].URL.Hostname()) {
+			return fmt.Errorf("blocked redirect to private/loopback address %s (possible SSRF)", req.URL.Host)
 		}
 		return nil
 	}
@@ -357,8 +398,6 @@ func (d *HTTPDownloader) downloadPart(part state.Part, wg *sync.WaitGroup,
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Cancel context when an interrupt arrives; also exit the goroutine when
-	// the context is cancelled by other means (e.g. normal completion via defer).
 	go func() {
 		select {
 		case <-interruptChan:
@@ -392,13 +431,12 @@ func (d *HTTPDownloader) downloadPart(part state.Part, wg *sync.WaitGroup,
 	}
 	defer resp.Body.Close()
 
-	f, err := os.OpenFile(part.Path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+	f, err := os.OpenFile(part.Path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
 	if err != nil {
 		ui.Errorf("%v\n", err)
 		errorChan <- err
 		return
 	}
-	defer f.Close()
 
 	pw := &progressWriter{
 		partIndex: int(part.Index),
@@ -426,8 +464,15 @@ func (d *HTTPDownloader) downloadPart(part state.Part, wg *sync.WaitGroup,
 		copyErr = res.err
 	}
 
-	// Save state: RangeFrom is updated to "next byte to download from".
-	// Resume() uses this value directly without adding fi.Size() again.
+	if copyErr == nil && !interrupted {
+		if syncErr := f.Sync(); syncErr != nil {
+			copyErr = fmt.Errorf("flushing part %d: %w", part.Index, syncErr)
+		}
+	}
+	if cerr := f.Close(); cerr != nil && copyErr == nil && !interrupted {
+		copyErr = fmt.Errorf("closing part %d: %w", part.Index, cerr)
+	}
+
 	savedPart := state.Part{
 		Index:     part.Index,
 		URL:       d.url,
@@ -477,10 +522,6 @@ func (d *HTTPDownloader) buildRequestForPart(ctx context.Context, part state.Par
 	return req, nil
 }
 
-// copyContent copies data from the response to the writer with optional rate
-// limiting. It returns any io.Copy error so callers can detect truncated
-// transfers (e.g. dropped connections) instead of silently producing short
-// part files.
 func (d *HTTPDownloader) copyContent(src io.Reader, dst io.Writer) error {
 	var err error
 	switch {

@@ -63,8 +63,8 @@ func (c cable) View(rows, width, portCol int) string {
 		portCol = width / 2
 	}
 
-	chrome := lipgloss.NewStyle().Foreground(colorPhosphor)
-	dim := lipgloss.NewStyle().Foreground(colorSlate)
+	chrome := fgStyle(colorPhosphor)
+	dim := fgStyle(colorSlate)
 
 	var trunkColor lipgloss.Color
 	var packetColor lipgloss.Color
@@ -93,8 +93,8 @@ func (c cable) View(rows, width, portCol int) string {
 		brokenRune = " "
 	}
 
-	trunkSty := lipgloss.NewStyle().Foreground(trunkColor)
-	pktSty := lipgloss.NewStyle().Foreground(packetColor).Bold(true)
+	trunkSty := fgStyle(trunkColor)
+	pktSty := fgBoldStyle(packetColor)
 
 	// Compute packet row index modulo rows.
 	pkt := int(c.packetPos) % rows
@@ -157,11 +157,11 @@ func (c cable) ViewBranching(width, portCol int, dropCols []int, activeDrop int)
 		return strings.Repeat(" ", width)
 	}
 
-	chromeOn := lipgloss.NewStyle().Foreground(colorPhosphor)
-	chromeDim := lipgloss.NewStyle().Foreground(colorSlate)
-	pkt := lipgloss.NewStyle().Foreground(colorAmber).Bold(true)
-	mint := lipgloss.NewStyle().Foreground(colorMint)
-	mag := lipgloss.NewStyle().Foreground(colorMagenta)
+	chromeOn := fgStyle(colorPhosphor)
+	chromeDim := fgStyle(colorSlate)
+	pkt := fgBoldStyle(colorAmber)
+	mint := fgStyle(colorMint)
+	mag := fgStyle(colorMagenta)
 
 	// pick line palette per state
 	lineSty := chromeOn

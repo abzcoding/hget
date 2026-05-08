@@ -1,6 +1,7 @@
 package downloader
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"os"
@@ -15,11 +16,10 @@ import (
 	"github.com/abzcoding/hget/internal/util"
 )
 
-// ReconstructStateFromParts rebuilds a *State for a URL that has existing part
-// files in the download folder but no state.json (e.g. killed with SIGKILL).
-// It probes the server for the total content length, recalculates the original
-// part boundaries, then advances RangeFrom by each part file's current size.
-func ReconstructStateFromParts(url string, skiptls bool, proxyServer string, timeout time.Duration) (*state.State, error) {
+func ReconstructStateFromParts(ctx context.Context, url string, skiptls bool, proxyServer string, timeout time.Duration) (*state.State, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	folder := state.FolderOf(url)
 	entries, err := os.ReadDir(folder)
 	if err != nil {
@@ -43,7 +43,7 @@ func ReconstructStateFromParts(url string, skiptls bool, proxyServer string, tim
 	// Probe server for content-length.
 	client := ProxyAwareHTTPClient(proxyServer, skiptls, timeout)
 	var totalLen int64
-	req, err := http.NewRequest("HEAD", url, nil)
+	req, err := http.NewRequestWithContext(ctx, "HEAD", url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("probe request: %w", err)
 	}
@@ -59,7 +59,10 @@ func ReconstructStateFromParts(url string, skiptls bool, proxyServer string, tim
 	}
 	// Fallback: range GET probe.
 	if totalLen == 0 {
-		req2, _ := http.NewRequest("GET", url, nil)
+		req2, rerr := http.NewRequestWithContext(ctx, "GET", url, nil)
+		if rerr != nil {
+			return nil, fmt.Errorf("probe request: %w", rerr)
+		}
 		req2.Header.Set("Range", "bytes=0-0")
 		req2.Header.Set("Accept-Encoding", "identity")
 		req2.Header.Set("User-Agent", defaultUserAgent)
@@ -78,7 +81,10 @@ func ReconstructStateFromParts(url string, skiptls bool, proxyServer string, tim
 	}
 
 	// Recalculate original part boundaries.
-	parts := PartCalculate(numParts, totalLen, url)
+	parts, err := PartCalculate(numParts, totalLen, url)
+	if err != nil {
+		return nil, err
+	}
 
 	// Advance RangeFrom by the bytes already on disk for each part.
 	for i := range parts {

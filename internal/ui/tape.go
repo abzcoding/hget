@@ -91,9 +91,9 @@ const tapeBannerWidth = dataLinkInnerW + 2 // 72
 // renderReel draws a 7×5 reel block: a hexagonal flange with quarter-arcs
 // at the corners and an animated hub in the centre.  Returns 5 lines.
 func (t tape) renderReel(invert bool, accent lipgloss.Color) []string {
-	flange := lipgloss.NewStyle().Foreground(colorSteel)
-	hub := lipgloss.NewStyle().Foreground(accent).Bold(true)
-	rim := lipgloss.NewStyle().Foreground(accent)
+	flange := fgStyle(colorSteel)
+	hub := fgBoldStyle(accent)
+	rim := fgStyle(accent)
 
 	hubGlyph := hub.Render(t.hubGlyph(invert))
 
@@ -112,13 +112,13 @@ func (t tape) renderReel(invert bool, accent lipgloss.Color) []string {
 }
 
 func (t tape) ViewBanner() string {
-	chrome := lipgloss.NewStyle().Foreground(colorPhosphor)
-	frame := lipgloss.NewStyle().Foreground(colorSlate)
-	steel := lipgloss.NewStyle().Foreground(colorSteel)
-	frost := lipgloss.NewStyle().Foreground(colorFrost).Bold(true)
-	amber := lipgloss.NewStyle().Foreground(colorAmber).Bold(true)
-	mint := lipgloss.NewStyle().Foreground(colorMint).Bold(true)
-	mag := lipgloss.NewStyle().Foreground(colorMagenta).Bold(true)
+	chrome := fgStyle(colorPhosphor)
+	frame := fgStyle(colorSlate)
+	steel := fgStyle(colorSteel)
+	frost := fgBoldStyle(colorFrost)
+	amber := fgBoldStyle(colorAmber)
+	mint := fgBoldStyle(colorMint)
+	mag := fgBoldStyle(colorMagenta)
 
 	// Pick palette per state.
 	var reelCol, fillCol, dimCol lipgloss.Color
@@ -247,10 +247,10 @@ func (t tape) renderRibbon(w int, fillCol, dimCol lipgloss.Color) []string {
 	if w < 4 {
 		w = 4
 	}
-	on := lipgloss.NewStyle().Foreground(fillCol).Bold(true)
-	off := lipgloss.NewStyle().Foreground(dimCol)
-	amber := lipgloss.NewStyle().Foreground(colorAmber).Bold(true)
-	steel := lipgloss.NewStyle().Foreground(colorSteel)
+	on := fgBoldStyle(fillCol)
+	off := fgStyle(dimCol)
+	amber := fgBoldStyle(colorAmber)
+	steel := fgStyle(colorSteel)
 
 	// Tape edges — solid double-line that visually attaches to the reel
 	// quarter-arcs (◜─◝ on top, ◟─◞ on bottom).
@@ -315,13 +315,13 @@ const (
 )
 
 func (t tape) ViewMini() string {
-	chrome := lipgloss.NewStyle().Foreground(colorSlate)
-	flangeC := lipgloss.NewStyle().Foreground(colorSteel)
-	frost := lipgloss.NewStyle().Foreground(colorFrost).Bold(true)
-	amber := lipgloss.NewStyle().Foreground(colorAmber).Bold(true)
-	mint := lipgloss.NewStyle().Foreground(colorMint).Bold(true)
-	mag := lipgloss.NewStyle().Foreground(colorMagenta).Bold(true)
-	steel := lipgloss.NewStyle().Foreground(colorSteel)
+	chrome := fgStyle(colorSlate)
+	flangeC := fgStyle(colorSteel)
+	frost := fgBoldStyle(colorFrost)
+	amber := fgBoldStyle(colorAmber)
+	mint := fgBoldStyle(colorMint)
+	mag := fgBoldStyle(colorMagenta)
+	steel := fgStyle(colorSteel)
 
 	var reelCol, fillCol, ledCol lipgloss.Color
 	ledOn := false
@@ -348,10 +348,10 @@ func (t tape) ViewMini() string {
 		statusGlyph = "✗"
 	}
 
-	hubL := lipgloss.NewStyle().Foreground(reelCol).Bold(true).Render(t.hubGlyph(false))
-	hubR := lipgloss.NewStyle().Foreground(reelCol).Bold(true).Render(t.hubGlyph(true))
-	fillStyOn := lipgloss.NewStyle().Foreground(fillCol).Bold(true)
-	fillStyOff := lipgloss.NewStyle().Foreground(colorSlate)
+	hubL := fgBoldStyle(reelCol).Render(t.hubGlyph(false))
+	hubR := fgBoldStyle(reelCol).Render(t.hubGlyph(true))
+	fillStyOn := fgBoldStyle(fillCol)
+	fillStyOff := fgStyle(colorSlate)
 
 	pad := func(s string, w int) string {
 		gap := w - lipgloss.Width(s)
@@ -405,7 +405,7 @@ func (t tape) ViewMini() string {
 
 	// Row 7: status LED + glyph + label inline.
 	ledRune := "·"
-	ledStyle := lipgloss.NewStyle().Foreground(ledCol)
+	ledStyle := fgStyle(ledCol)
 	if ledOn {
 		ledRune = "●"
 		ledStyle = ledStyle.Bold(true)
