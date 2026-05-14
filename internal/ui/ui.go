@@ -2358,21 +2358,27 @@ const helpMarkdown = "" +
 	"| `--extractor <m>`   | extractor mode: `auto` / `yt-dlp` / `none`             | `auto`      |\n" +
 	"| `--cookies <path>`  | cookies.txt for the extractor (yt-dlp `--cookies`)     |             |\n" +
 	"| `--cookies-from-browser <s>` | extract cookies from browser (e.g. `firefox`, `chrome:Default`) | |\n" +
+	"| `--quality <preset>` | extractor quality preset: `360p` / `480p` / `720p` / `1080p` / `1440p` / `4K` / `8K` / `best` / `audio` | `720p` |\n" +
+	"| `--container <ext>` | extractor output container: `mp4` / `mkv` / `webm` | `mp4` |\n" +
+	"| `--audio-lang <code>` | preferred audio language (forwarded as yt-dlp `-S lang:<code>`); empty disables the bias | `en` |\n" +
+	"| `--pick-format`     | open the VCR rocker UI to choose resolution / audio / container by hand | `false` |\n" +
 	"\n" +
 	"## Extractor mode (yt-dlp pipeline)\n" +
 	"\n" +
 	"When the URL points at a media host (YouTube, Vimeo, Twitch, …) hget hands\n" +
 	"off to `yt-dlp` and renders a retro VCR panel instead of the data-link.\n" +
-	"After probing, the deck enters **browsing mode** — the READY LED lights\n" +
-	"amber and three rocker switches replace the live readouts so you can pick\n" +
-	"the tape before the heads come down. No popups, no jumpscreens: the same\n" +
-	"chassis re-displays.\n" +
+	"By default the deck goes straight from probing to recording at the\n" +
+	"`--quality` preset (720p mp4) with English audio — no rocker UI, no\n" +
+	"jumpscreens.  yt-dlp gets `-S lang:en` so YouTube's auto-translated\n" +
+	"audio tracks don't win over the original-language stream.\n" +
 	"\n" +
-	"Press REC (`enter` / `r`) to engage; the VCR slides straight into the\n" +
-	"recording animation. The Mixer console fades in below once yt-dlp moves\n" +
-	"into the ffmpeg muxing phase.\n" +
+	"Pass `--pick-format` to opt into the rocker UI: after probing, the\n" +
+	"deck enters **browsing mode** with three rockers (video / audio /\n" +
+	"container) on the same chassis.  Press REC (`enter` / `r`) to engage.\n" +
+	"In batch mode the first tape's pick is locked in for the whole queue\n" +
+	"and applied adaptively to videos that don't share the same format IDs.\n" +
 	"\n" +
-	"### Browsing-mode keys\n" +
+	"### Browsing-mode keys (with `--pick-format`)\n" +
 	"\n" +
 	"| Key                  | Rocker                                          |\n" +
 	"| -------------------- | ----------------------------------------------- |\n" +
@@ -2388,6 +2394,23 @@ const helpMarkdown = "" +
 	"Progressive streams (Twitter, etc.) collapse the audio rocker into\n" +
 	"`(included)`. Live streams skip the selector entirely and engage\n" +
 	"yt-dlp's `best` format on sight.\n" +
+	"\n" +
+	"### Batch mode (a file of YouTube URLs)\n" +
+	"\n" +
+	"`--file urls.txt` is **all-or-nothing**: if any URL in the file looks\n" +
+	"extractable (or `--extractor=yt-dlp` is forced), the whole list is\n" +
+	"routed through yt-dlp.  A horizontal **cassette shelf** appears above\n" +
+	"the VCR — one VHS tape per URL, with the active tape lifted out of its\n" +
+	"slot.  Plain HTTP URLs go to yt-dlp's generic extractor.\n" +
+	"\n" +
+	"Every tape uses the same `--quality` preset by default.  Probes run\n" +
+	"in parallel so spine labels — title, channel chip, runtime,\n" +
+	"resolution — resolve ahead of the deck reaching their position.  The\n" +
+	"shelf scales down (or up) automatically based on terminal width: full\n" +
+	"detail on wide terminals, compact tape spines on narrow ones.\n" +
+	"\n" +
+	"Failed tapes get a magenta `✗` sticker and the queue continues to the\n" +
+	"next URL — failures never abort the batch.\n" +
 	"\n" +
 	"## Examples\n" +
 	"\n" +
@@ -2419,6 +2442,18 @@ const helpMarkdown = "" +
 	"\n" +
 	"# YouTube using your live browser cookies (no export needed)\n" +
 	"hget --cookies-from-browser firefox https://www.youtube.com/watch?v=dQw4w9WgXcQ\n" +
+	"\n" +
+	"# batch of YouTube URLs — VCR + cassette-shelf TUI, 720p mp4 default\n" +
+	"hget --file videos.txt\n" +
+	"\n" +
+	"# YouTube at 1080p mkv, keep English audio (skips auto-translations)\n" +
+	"hget --quality 1080p --container mkv https://www.youtube.com/watch?v=dQw4w9WgXcQ\n" +
+	"\n" +
+	"# audio-only — pulls best audio track in original language\n" +
+	"hget --quality audio https://www.youtube.com/watch?v=dQw4w9WgXcQ\n" +
+	"\n" +
+	"# manually pick resolution/audio/container via the VCR rockers\n" +
+	"hget --pick-format https://www.youtube.com/watch?v=dQw4w9WgXcQ\n" +
 	"```\n"
 
 func PrintHelp() {

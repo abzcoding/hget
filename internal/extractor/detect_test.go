@@ -110,6 +110,111 @@ func TestFormatSelection_ArgsExplicit(t *testing.T) {
 	}
 }
 
+func TestFormatPreference_AdaptiveSpec(t *testing.T) {
+	cases := []struct {
+		name string
+		pref FormatPreference
+		want string
+	}{
+		{
+			name: "zero falls back to universal default",
+			pref: FormatPreference{},
+			want: "bv*+ba/b",
+		},
+		{
+			name: "height only",
+			pref: FormatPreference{HeightCeiling: 720},
+			want: "bv[height<=720]+ba/bv[height<=720]+ba/bv+ba/b",
+		},
+		{
+			name: "height + codec + abr cap",
+			pref: FormatPreference{HeightCeiling: 1080, VCodec: "avc1", ABRCeiling: 160},
+			want: "bv[height<=1080][vcodec~='^avc1']+ba[abr<=160]/bv[height<=1080]+ba/bv+ba/b",
+		},
+		{
+			name: "progressive single-stream pick",
+			pref: FormatPreference{HeightCeiling: 720, Progressive: true},
+			want: "b[height<=720]/best",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.pref.AdaptiveSpec(); got != tc.want {
+				t.Errorf("AdaptiveSpec = %q\nwant         %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestQualityPreset_KnownNames(t *testing.T) {
+	cases := []struct {
+		name        string
+		wantHeight  int
+		wantSpec    string
+		wantContainer string
+	}{
+		{"720p", 720, "", "mp4"},
+		{"1080p", 1080, "", "mp4"},
+		{"4K", 2160, "", "mp4"},
+		{"best", 0, "", "mp4"},
+		{"audio", 0, "ba/bestaudio", "mp4"},
+		{"unknown", 0, "", "mp4"},
+		{"", 0, "", "mp4"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := QualityPreset(tc.name, "")
+			if got.Container != tc.wantContainer {
+				t.Errorf("Container=%q want %q", got.Container, tc.wantContainer)
+			}
+			if got.Spec != tc.wantSpec {
+				t.Errorf("Spec=%q want %q", got.Spec, tc.wantSpec)
+			}
+			if got.Pref.HeightCeiling != tc.wantHeight {
+				t.Errorf("HeightCeiling=%d want %d", got.Pref.HeightCeiling, tc.wantHeight)
+			}
+		})
+	}
+}
+
+func TestQualityPreset_CustomContainer(t *testing.T) {
+	got := QualityPreset("1080p", "mkv")
+	if got.Container != "mkv" {
+		t.Errorf("Container=%q want mkv", got.Container)
+	}
+}
+
+func TestOptions_SortArgs_LangPref(t *testing.T) {
+	got := Options{LangPref: "en"}.sortArgs()
+	want := []string{"-S", "lang:en"}
+	for i, w := range want {
+		if i >= len(got) || got[i] != w {
+			t.Errorf("sortArgs[%d]=%q want %q (got=%v)", i, got[i], w, got)
+		}
+	}
+}
+
+func TestOptions_SortArgs_EmptyPrefDisabled(t *testing.T) {
+	if got := (Options{}).sortArgs(); len(got) != 0 {
+		t.Errorf("empty LangPref should produce no -S args, got %v", got)
+	}
+}
+
+func TestFormatSelection_ArgsUseAdaptiveWhenPrefSet(t *testing.T) {
+	// When Pref is non-zero, the adaptive expression wins regardless
+	// of any Spec — guarantees cross-tape fallback inside the batch
+	// FormatAll pipeline.
+	got := FormatSelection{
+		Spec:      "299+140", // would normally win
+		Container: "mp4",
+		Pref:      FormatPreference{HeightCeiling: 1080, VCodec: "avc1"},
+	}.Args()
+	want := "bv[height<=1080][vcodec~='^avc1']+ba/bv[height<=1080]+ba/bv+ba/b"
+	if got[1] != want {
+		t.Errorf("Args[1] = %q, want %q", got[1], want)
+	}
+}
+
 func TestParseMetaJSON_ExtractsFormats(t *testing.T) {
 	doc := []byte(`{
         "title": "Sample",

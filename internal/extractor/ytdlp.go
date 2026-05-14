@@ -40,6 +40,13 @@ type Options struct {
 	// `--cookies-from-browser <spec>`.  Empty means no browser cookie
 	// extraction.
 	CookiesFromBrowser string
+
+	// LangPref biases yt-dlp's format sort toward audio tracks in the
+	// named language.  Forwarded as `-S "lang:<LangPref>"`.  Empty
+	// disables the sort override.  Default for the hget CLI is "en"
+	// so YouTube's auto-dubbed translations don't override the
+	// original English audio.
+	LangPref string
 }
 
 // authArgs returns the yt-dlp CLI fragments the Options struct contributes.
@@ -54,6 +61,17 @@ func (o Options) authArgs() []string {
 		args = append(args, "--cookies-from-browser", o.CookiesFromBrowser)
 	}
 	return args
+}
+
+// sortArgs returns the yt-dlp `-S` ordering fragments contributed by
+// the Options struct.  Currently just the language preference; kept
+// as its own helper so we can compose more sort keys (HDR, codec
+// family) without touching Run/Probe call-sites.
+func (o Options) sortArgs() []string {
+	if o.LangPref == "" {
+		return nil
+	}
+	return []string{"-S", "lang:" + o.LangPref}
 }
 
 // MetaSink receives streaming events as the yt-dlp child process emits
@@ -113,18 +131,96 @@ type FormatSelection struct {
 	//   "248+251"      // explicit pair (separate streams, will mux)
 	//   "22"           // single progressive format (no mux needed)
 	//   "bv[height<=720]+ba"
+	//
+	// When Pref is non-zero the adaptive Pref.AdaptiveSpec() is used
+	// in preference to Spec — this is how the batch FormatAll policy
+	// makes one user pick work across videos that don't all share the
+	// same exact format IDs.
 	Spec string
 
 	// Container is forwarded as the value of `--merge-output-format`.
 	// Ignored when Spec resolves to a single progressive format
 	// (yt-dlp skips the merger in that path).
 	Container string
+
+	// Pref carries an adaptive description of the chosen quality
+	// (height ceiling, codec family hint, audio bitrate ceiling).
+	// Used by the batch pipeline so one pick on tape #1 maps cleanly
+	// onto tape #2's potentially-different format catalogue.  Empty
+	// means "use Spec verbatim".
+	Pref FormatPreference
+}
+
+// FormatPreference describes a quality target that adapts across
+// different sources.  Used when a single user choice has to apply to
+// a queue of videos that won't all expose the same exact format IDs.
+//
+// The AdaptiveSpec() method translates these descriptors into a
+// yt-dlp `-f` expression that uses filter syntax (`[height<=1080]`,
+// `[vcodec~='^avc1']`, `[abr<=160]`) with progressively-loosened
+// fallbacks so a missing-format error never aborts a tape.
+type FormatPreference struct {
+	HeightCeiling int    // max video height (0 = no cap)
+	FPSFloor      int    // prefer fps >= this (0 = any)
+	VCodec        string // codec family hint, e.g. "avc1" / "vp9" / "av01"
+	ABRCeiling    int    // max audio bitrate kbps (0 = no cap)
+	Progressive   bool   // chose a progressive format on tape #1
+}
+
+// IsZero reports whether the preference carries any meaningful filter.
+func (p FormatPreference) IsZero() bool {
+	return p.HeightCeiling == 0 && p.FPSFloor == 0 && p.VCodec == "" && p.ABRCeiling == 0 && !p.Progressive
+}
+
+// AdaptiveSpec renders the preference as a yt-dlp -f expression with
+// progressive fallbacks.  Never returns an empty string — falls back
+// to the universal "bv*+ba/b" default when no descriptors are set.
+//
+// Example output for { HeightCeiling: 1080, VCodec: "avc1", ABRCeiling: 160 }:
+//
+//	bv[height<=1080][vcodec~='^avc1']+ba[abr<=160]/bv[height<=1080]+ba/bv+ba/b
+//
+// The chain works as: try exact match → drop codec filter → drop
+// height filter → ultimate fallback.  yt-dlp evaluates left-to-right
+// and takes the first chain that resolves to real formats.
+func (p FormatPreference) AdaptiveSpec() string {
+	if p.IsZero() {
+		return "bv*+ba/b"
+	}
+	if p.Progressive {
+		// Progressive: single format that already carries audio.
+		s := "b"
+		if p.HeightCeiling > 0 {
+			s += fmt.Sprintf("[height<=%d]", p.HeightCeiling)
+		}
+		return s + "/best"
+	}
+	// Build the tightest filter we can, then loosen for fallbacks.
+	v := "bv"
+	if p.HeightCeiling > 0 {
+		v += fmt.Sprintf("[height<=%d]", p.HeightCeiling)
+	}
+	vWithCodec := v
+	if p.VCodec != "" {
+		vWithCodec = v + fmt.Sprintf("[vcodec~='^%s']", p.VCodec)
+	}
+	a := "ba"
+	if p.ABRCeiling > 0 {
+		a += fmt.Sprintf("[abr<=%d]", p.ABRCeiling)
+	}
+	primary := vWithCodec + "+" + a
+	mid := v + "+ba"
+	return primary + "/" + mid + "/bv+ba/b"
 }
 
 // Args renders the selection as yt-dlp CLI fragments, applying defaults
-// for empty fields.  Always returns a non-empty slice.
+// for empty fields.  Pref.AdaptiveSpec() wins when set — that path is
+// what survives cross-tape format variability in the batch pipeline.
 func (s FormatSelection) Args() []string {
 	spec := s.Spec
+	if !s.Pref.IsZero() {
+		spec = s.Pref.AdaptiveSpec()
+	}
 	if spec == "" {
 		spec = "bv*+ba/b"
 	}
@@ -140,6 +236,42 @@ func (s FormatSelection) Args() []string {
 // choice.  A nil SelectorFunc means "use FormatSelection{}".  Returning
 // a non-nil error aborts the pipeline before yt-dlp is spawned.
 type SelectorFunc func(ctx context.Context, meta Meta) (FormatSelection, error)
+
+// QualityPreset builds a FormatSelection from a human-readable preset
+// name ("720p", "1080p", "1440p", "4K", "8K", "best", "audio").  The
+// container defaults to "mp4" when empty.  Unknown preset names fall
+// through to "best" with no height cap.
+//
+// This is what the hget CLI uses to skip the rocker browser entirely:
+// the user says `--quality 1080p` and yt-dlp gets an adaptive filter
+// expression that picks the best available stream at ≤ 1080p.
+func QualityPreset(name, container string) FormatSelection {
+	if container == "" {
+		container = "mp4"
+	}
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "", "best":
+		return FormatSelection{Container: container}
+	case "audio", "audio-only", "music":
+		return FormatSelection{Spec: "ba/bestaudio", Container: container}
+	case "360p":
+		return FormatSelection{Container: container, Pref: FormatPreference{HeightCeiling: 360}}
+	case "480p":
+		return FormatSelection{Container: container, Pref: FormatPreference{HeightCeiling: 480}}
+	case "720p":
+		return FormatSelection{Container: container, Pref: FormatPreference{HeightCeiling: 720}}
+	case "1080p":
+		return FormatSelection{Container: container, Pref: FormatPreference{HeightCeiling: 1080}}
+	case "1440p", "2k":
+		return FormatSelection{Container: container, Pref: FormatPreference{HeightCeiling: 1440}}
+	case "2160p", "4k", "uhd":
+		return FormatSelection{Container: container, Pref: FormatPreference{HeightCeiling: 2160}}
+	case "4320p", "8k":
+		return FormatSelection{Container: container, Pref: FormatPreference{HeightCeiling: 4320}}
+	default:
+		return FormatSelection{Container: container}
+	}
+}
 
 // DownloadProgress is the parsed state of one yt-dlp [download] line.
 type DownloadProgress struct {
@@ -216,6 +348,7 @@ func Run(ctx context.Context, url, outDir string, opts Options, sel FormatSelect
 	args = append(args, sel.Args()...)
 	args = append(args, "-o", "%(title)s.%(ext)s")
 	args = append(args, opts.authArgs()...)
+	args = append(args, opts.sortArgs()...)
 	args = append(args, url)
 	if outDir != "" {
 		args = append([]string{"-P", outDir}, args...)

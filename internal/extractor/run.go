@@ -13,11 +13,24 @@ import (
 // program by translating each event into a ui.Extractor* Tea message.
 // When ui.Program is nil (no TUI), events are dropped — caller is
 // expected to print a friendly summary in that path.
-type uiSink struct{ meta Meta }
+type uiSink struct {
+	meta Meta
+	// metaAlreadySent suppresses the re-broadcast of ExtractorMetaMsg
+	// during Run() when the caller (e.g. BatchPipeline) has already
+	// pushed metadata to the UI between probe and run.  Avoids a flash
+	// of duplicate "0%" updates.
+	metaAlreadySent bool
+	// enableBrowsing controls whether the sink emits the
+	// ExtractorFormatsMsg that puts the VCR into rocker-browsing
+	// mode.  False by default — the hget CLI uses a quality preset
+	// (720p mp4) and only sets this when the user passes
+	// `--pick-format` to opt into manual selection.
+	enableBrowsing bool
+}
 
 func (s *uiSink) OnMeta(m Meta) {
 	s.meta = m
-	if ui.Program == nil {
+	if ui.Program == nil || s.metaAlreadySent {
 		return
 	}
 	ui.Program.Send(ui.ExtractorMetaMsg{
@@ -33,8 +46,12 @@ func (s *uiSink) OnMeta(m Meta) {
 		OutputFile: m.SafeFilename(),
 	})
 	// Surface the format table separately so the VCR can drop into
-	// browsing mode.  Audio-only formats are an optional rocker — if
-	// the list is empty the UI hides that switch entirely.
+	// browsing mode — but only when the caller opted in.  When the
+	// quality preset path is active we never want the rocker UI to
+	// appear: the VCR slides straight from standby into recording.
+	if !s.enableBrowsing {
+		return
+	}
 	video := m.VideoFormats()
 	audio := m.AudioFormats()
 	if len(video) == 0 && len(audio) == 0 {
@@ -118,14 +135,20 @@ func toUIFormats(in []Format) []ui.ExtractorFormat {
 //
 // `outDir` is forwarded to yt-dlp via -P (download path).  Empty means
 // "current working directory" — matching hget's existing behaviour for
-// HTTP downloads.  `opts` carries optional auth (cookies file / browser).
+// HTTP downloads.  `opts` carries optional auth (cookies file / browser)
+// and the language preference forwarded as `-S lang:<pref>`.
+//
+// `enableBrowsing` controls whether the TUI is allowed to drop into
+// rocker-selection mode after the probe.  When false, the rocker UI
+// is suppressed entirely and the selector is expected to return a
+// preset immediately without blocking.
 //
 // `selector`, when non-nil, is invoked after Probe with the resolved
-// metadata.  Callers wire this to the TUI's format browser so the user
-// picks a tape before yt-dlp engages.  A nil selector (or one returning
-// FormatSelection{}) falls through to yt-dlp's bv*+ba/b default.
-func Pipeline(ctx context.Context, url, outDir string, opts Options, selector SelectorFunc) error {
-	sink := &uiSink{}
+// metadata.  Callers wire this either to the TUI's format browser
+// (browsing path) or to a preset-returning fast path (non-browsing).
+// A nil selector falls through to yt-dlp's bv*+ba/b default.
+func Pipeline(ctx context.Context, url, outDir string, opts Options, enableBrowsing bool, selector SelectorFunc) error {
+	sink := &uiSink{enableBrowsing: enableBrowsing}
 
 	// ── Probe phase. ────────────────────────────────────────────────
 	// Probe is fast (single HTTP roundtrip) — so we wrap it in a tight

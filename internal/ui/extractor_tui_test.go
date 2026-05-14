@@ -246,6 +246,21 @@ func TestExtractorModel_BrowsingRockersAndREC(t *testing.T) {
 	if committed.Container != "mkv" {
 		t.Errorf("committed container = %q, want mkv", committed.Container)
 	}
+	// Adaptive descriptors must be populated from the chosen video +
+	// audio formats so the batch FormatAll pipeline can fall back to
+	// a close match on tapes that lack format IDs 299/140.
+	if committed.HeightCeiling != 1080 {
+		t.Errorf("HeightCeiling=%d want 1080", committed.HeightCeiling)
+	}
+	if committed.VCodec != "avc1" {
+		t.Errorf("VCodec=%q want avc1", committed.VCodec)
+	}
+	if committed.ABRCeiling != 128 {
+		t.Errorf("ABRCeiling=%d want 128", committed.ABRCeiling)
+	}
+	if committed.Progressive {
+		t.Errorf("Progressive=true for separate v+a pick — should be false")
+	}
 
 	// After REC the panel transitions out of browsing — no more ARMED.
 	m = tickN(t, m, 3)
@@ -296,6 +311,62 @@ func TestExtractorModel_ProgressiveOnlyCollapsesAudioRocker(t *testing.T) {
 	m = tickN(t, m, 3)
 	view := stripANSI(m.View())
 	mustContain(t, view, "included", "audio rocker should collapse for progressive-only sources")
+}
+
+func TestExtractorModel_ShelfRendersAboveDeck(t *testing.T) {
+	m := NewExtractorModel("https://youtu.be/aaa", func() {})
+	m.width = 120
+	m.height = 60
+
+	m = step(t, m,
+		ExtractorShelfSeedMsg{URLs: []string{
+			"https://youtu.be/aaa",
+			"https://youtu.be/bbb",
+			"https://youtu.be/ccc",
+		}},
+		ExtractorShelfMetaMsg{Index: 0, Title: "First Video", Channel: "Chan", Duration: 90 * time.Second, Resolution: "1080p"},
+		ExtractorShelfActiveMsg{Index: 0},
+		ExtractorShelfStatusMsg{Index: 0, Status: CassettePlaying},
+	)
+	m = tickN(t, m, 5)
+
+	view := stripANSI(m.View())
+	mustContain(t, view, "First Video", "shelf didn't render the active tape title")
+	mustContain(t, view, "⏵ 01 / 03", "shelf counter strip missing")
+	mustContain(t, view, "HGET·VCR", "deck still rendered below shelf")
+}
+
+func TestExtractorModel_ResetDeckClearsBetweenItems(t *testing.T) {
+	m := NewExtractorModel("u1", func() {})
+	m.width = 100
+	m.height = 60
+
+	// Seed first tape, drive it to completion.
+	m = step(t, m,
+		ExtractorMetaMsg{Title: "Tape One", HasAudio: true, Duration: time.Minute},
+		ExtractorPhaseMsg{Phase: "downloading"},
+		ExtractorProgressMsg{Percent: 87, Downloaded: 870, Total: 1000, SpeedBPS: 1000},
+		ExtractorOutputMsg{Path: "/tmp/Tape One.mp4"},
+	)
+	m = tickN(t, m, 10)
+	view := stripANSI(m.View())
+	mustContain(t, view, "Tape One", "tape one didn't render")
+
+	// Reset deck → next tape's metadata should replace it cleanly.
+	m = step(t, m,
+		ExtractorResetDeckMsg{},
+		ExtractorURLMsg{URL: "https://youtu.be/two"},
+		ExtractorMetaMsg{Title: "Tape Two", HasAudio: true, Duration: 30 * time.Second},
+		ExtractorPhaseMsg{Phase: "downloading"},
+		ExtractorProgressMsg{Percent: 5, Downloaded: 50, Total: 1000, SpeedBPS: 500},
+	)
+	m = tickN(t, m, 10)
+	view = stripANSI(m.View())
+	mustContain(t, view, "Tape Two", "tape two didn't replace tape one")
+	if strings.Contains(view, "Tape One.mp4") {
+		t.Errorf("reset failed to clear previous output path:\n%s", view)
+	}
+	mustContain(t, view, "youtu.be/two", "URL line didn't update for new tape")
 }
 
 func TestExtractorModel_ErrorRenders(t *testing.T) {

@@ -86,6 +86,39 @@ exit 0
 	mustHaveSeq(t, args, "--cookies-from-browser", "firefox")
 }
 
+// TestRun_ForwardsLangPrefAsSortArg proves that LangPref lands on the
+// child yt-dlp command line as the expected `-S lang:<code>` pair —
+// the mechanism that suppresses YouTube's auto-translated audio
+// tracks in favour of the original-language stream.
+func TestRun_ForwardsLangPrefAsSortArg(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shim is POSIX-only")
+	}
+	tmp := t.TempDir()
+	shim := filepath.Join(tmp, "yt-dlp")
+	argDump := filepath.Join(tmp, "argv")
+	script := `#!/bin/sh
+printf '%s\n' "$@" > ` + argDump + `
+echo "[download] Destination: /tmp/x.mp4"
+echo "HGET|100.0%|10|10|10|0|NA|NA"
+exit 0
+`
+	if err := os.WriteFile(shim, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", tmp)
+
+	sink := &fakeSink{}
+	_, err := Run(context.Background(), "https://example.com/x", "",
+		Options{LangPref: "en"}, FormatSelection{}, sink)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	raw, _ := os.ReadFile(argDump)
+	args := strings.Split(strings.TrimRight(string(raw), "\n"), "\n")
+	mustHaveSeq(t, args, "-S", "lang:en")
+}
+
 // TestProbe_ForwardsCookieFlagsToYTDLP — same idea, but for the JSON
 // probe path.  YouTube's bot challenge gates the probe too, so cookies
 // must reach yt-dlp -J as well.

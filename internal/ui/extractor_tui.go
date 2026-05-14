@@ -81,10 +81,57 @@ type ExtractorFormatsMsg struct {
 // ExtractorSelectionMsg is internal — the model emits it when the user
 // commits a format choice in browsing mode.  The runner forwards the
 // payload to the worker goroutine via a buffered channel.
+//
+// In addition to the exact format spec, the message carries adaptive
+// descriptors (height ceiling, codec hint, audio bitrate ceiling).
+// The batch pipeline uses those to build a yt-dlp filter expression
+// that survives videos that lack the originally-picked format IDs.
 type ExtractorSelectionMsg struct {
 	Spec      string
 	Container string
+
+	HeightCeiling int
+	FPSFloor      int
+	VCodec        string
+	ABRCeiling    int
+	Progressive   bool
 }
+
+// ExtractorShelfSeedMsg installs the cassette shelf at batch start.
+// One CassetteItem per URL.  Sent before any per-tape activity so the
+// shelf is visible from the first frame.
+type ExtractorShelfSeedMsg struct {
+	URLs []string
+}
+
+// ExtractorShelfMetaMsg fills in the metadata for one cassette as
+// probes resolve.  Fired by the eager probe pool so spine labels
+// populate ahead of the deck reaching that tape.
+type ExtractorShelfMetaMsg struct {
+	Index      int
+	Title      string
+	Channel    string
+	Resolution string
+	Duration   time.Duration
+}
+
+// ExtractorShelfStatusMsg updates one cassette's lifecycle state.
+type ExtractorShelfStatusMsg struct {
+	Index  int
+	Status CassetteStatus
+	Err    string
+}
+
+// ExtractorShelfActiveMsg marks one cassette as the currently-playing
+// tape.  Pass Index=-1 between items or at end-of-batch.
+type ExtractorShelfActiveMsg struct {
+	Index int
+}
+
+// ExtractorResetDeckMsg clears the deck (progress, output path, logs)
+// between batch items so the next tape starts fresh.  The VCR returns
+// to standby until the next ExtractorMetaMsg arrives.
+type ExtractorResetDeckMsg struct{}
 
 // extractorTickMsg drives animations.
 type extractorTickMsg time.Time
@@ -117,6 +164,11 @@ type extractorModel struct {
 	onQuit        func()
 	onSelection   func(ExtractorSelectionMsg) // wired by RunExtractorTUI
 	startT        time.Time
+
+	// Batch-mode cassette shelf.  Nil for single-URL extractor runs;
+	// non-nil once ExtractorShelfSeedMsg arrives, rendered above the
+	// VCR for the lifetime of the program.
+	shelf *CassetteShelf
 }
 
 // NewExtractorModel constructs the extractor-mode TUI model.
@@ -143,6 +195,11 @@ func NewExtractorModel(url string, onQuit func()) extractorModel {
 func (m *extractorModel) SetSelectionCallback(f func(ExtractorSelectionMsg)) {
 	m.onSelection = f
 }
+
+// ExtractorURLMsg updates the "source" line shown above the shelf when
+// the active tape changes mid-batch.  In single-URL mode the URL is
+// fixed at construction time and this message is never sent.
+type ExtractorURLMsg struct{ URL string }
 
 func (m extractorModel) Init() tea.Cmd {
 	return tea.Batch(m.spinner.Tick, extractorTickCmd())
@@ -186,13 +243,13 @@ func (m extractorModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.vcr.CycleContainer(-1)
 				return m, nil
 			case "enter", "r", "R":
-				spec, cont := m.vcr.Selection()
+				sel := m.vcr.Selection()
 				m.hasSelection = true
 				m.browsing = false
 				m.phase = "downloading"
 				m.vcr.SetMode(VCRRecording)
 				if m.onSelection != nil {
-					m.onSelection(ExtractorSelectionMsg{Spec: spec, Container: cont})
+					m.onSelection(sel)
 				}
 				return m, nil
 			}
@@ -217,7 +274,48 @@ func (m extractorModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case extractorTickMsg:
 		m.vcr.Tick()
 		m.mixer.Tick()
+		if m.shelf != nil {
+			m.shelf.Tick()
+		}
 		return m, extractorTickCmd()
+
+	case ExtractorShelfSeedMsg:
+		m.shelf = NewCassetteShelf(msg.URLs)
+		return m, nil
+
+	case ExtractorShelfMetaMsg:
+		if m.shelf != nil {
+			m.shelf.SetMeta(msg.Index, msg.Title, msg.Channel, msg.Resolution, msg.Duration)
+		}
+		return m, nil
+
+	case ExtractorShelfStatusMsg:
+		if m.shelf != nil {
+			m.shelf.SetStatus(msg.Index, msg.Status, msg.Err)
+		}
+		return m, nil
+
+	case ExtractorShelfActiveMsg:
+		if m.shelf != nil {
+			m.shelf.SetActive(msg.Index)
+		}
+		return m, nil
+
+	case ExtractorURLMsg:
+		m.url = msg.URL
+		return m, nil
+
+	case ExtractorResetDeckMsg:
+		// Reset VCR + mixer + logs so the next tape starts clean.  We
+		// don't touch the shelf — it tracks the whole batch.
+		m.vcr = NewVCR()
+		m.mixer = NewMixer()
+		m.outputPath = ""
+		m.meta = ExtractorMetaMsg{}
+		m.browsing = false
+		m.hasSelection = false
+		m.phase = "probing"
+		return m, nil
 
 	case ExtractorMetaMsg:
 		m.meta = msg
@@ -346,6 +444,14 @@ func (m extractorModel) View() string {
 
 	b.WriteString("\n")
 
+	// Cassette shelf (batch mode only).  The shelf is the queue's
+	// "video library wall" — sits above the deck so the VCR remains
+	// the focal point.
+	if m.shelf != nil {
+		b.WriteString(m.shelf.View(w))
+		b.WriteString("\n\n")
+	}
+
 	// Active panel — VCR while downloading, Mixer while muxing.  We
 	// always render the VCR (it carries the metadata), and overlay the
 	// Mixer below it once the post-processing phase begins.
@@ -420,11 +526,13 @@ func centreBlock(block string, termW int) string {
 // ── Run loop ─────────────────────────────────────────────────────────────────
 
 // ExtractorSelector blocks until the user commits a format selection
-// from the VCR's browsing mode, or until ctx is cancelled.  Returns the
-// yt-dlp spec + container chosen.  Empty strings mean "use the default
-// pipeline" — happens when the source has no selectable formats or the
-// user dismissed without picking.
-type ExtractorSelector func(ctx context.Context) (spec, container string, err error)
+// from the VCR's browsing mode, or until ctx is cancelled.  Returns
+// the full ExtractorSelectionMsg so callers can pull both the exact
+// spec (for single-URL runs) and the adaptive descriptors (for batch
+// FormatAll caching).  A zero-value selection means "use the default
+// pipeline" — happens when the source has no selectable formats or
+// the user dismissed without picking.
+type ExtractorSelector func(ctx context.Context) (ExtractorSelectionMsg, error)
 
 // ExtractorRunOptions configures RunExtractorTUI.
 type ExtractorRunOptions struct {
@@ -450,8 +558,8 @@ func RunExtractorTUI(opts ExtractorRunOptions, worker func(ExtractorSelector) er
 		// through charmbracelet/log via ui.Printf().  Program stays nil
 		// so the extractor sink drops UI events.  The selector returns
 		// the zero value so yt-dlp's bv*+ba/b default kicks in.
-		return worker(func(ctx context.Context) (string, string, error) {
-			return "", "", nil
+		return worker(func(ctx context.Context) (ExtractorSelectionMsg, error) {
+			return ExtractorSelectionMsg{}, nil
 		})
 	}
 
@@ -467,12 +575,12 @@ func RunExtractorTUI(opts ExtractorRunOptions, worker func(ExtractorSelector) er
 	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithoutSignalHandler())
 	Program = p
 
-	selector := func(ctx context.Context) (string, string, error) {
+	selector := func(ctx context.Context) (ExtractorSelectionMsg, error) {
 		select {
 		case s := <-selectionCh:
-			return s.Spec, s.Container, nil
+			return s, nil
 		case <-ctx.Done():
-			return "", "", ctx.Err()
+			return ExtractorSelectionMsg{}, ctx.Err()
 		}
 	}
 

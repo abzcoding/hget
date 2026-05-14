@@ -148,26 +148,44 @@ func (v VCRAnimation) CurrentContainer() string {
 	return v.containers[clampIdx(v.containerIdx, len(v.containers))]
 }
 
-// Selection builds the yt-dlp format spec from the current rocker
-// positions.  When the chosen video format is progressive (carries its
-// own audio), the audio selector is ignored.
-func (v VCRAnimation) Selection() (spec, container string) {
-	container = v.CurrentContainer()
+// Selection builds the full format selection (exact spec + container
+// + adaptive descriptors) from the current rocker positions.  When
+// the chosen video format is progressive (carries its own audio), the
+// audio selector is ignored.  The adaptive descriptors let downstream
+// callers translate the pick into a yt-dlp filter expression that
+// survives sources lacking the exact format IDs.
+func (v VCRAnimation) Selection() ExtractorSelectionMsg {
+	sel := ExtractorSelectionMsg{Container: v.CurrentContainer()}
 	vf, hasV := v.CurrentVideo()
 	if !hasV {
-		// No video formats at all (audio-only source) — fall back to
-		// just the audio pick.
 		if af, ok := v.CurrentAudio(); ok {
-			return af.ID, container
+			sel.Spec = af.ID
+			sel.ABRCeiling = int(af.ABR)
+			if sel.ABRCeiling == 0 {
+				sel.ABRCeiling = int(af.TBR)
+			}
 		}
-		return "", container
+		return sel
+	}
+	// Common video descriptors regardless of progressive vs separate.
+	sel.HeightCeiling = vf.Height
+	sel.FPSFloor = int(vf.FPS)
+	if vf.VCodec != "" && vf.VCodec != "none" {
+		sel.VCodec = shortCodec(vf.VCodec)
 	}
 	if vf.HasAudio || !hasAudioPick(v) {
 		// Progressive format, or no audio track to merge in.
-		return vf.ID, container
+		sel.Spec = vf.ID
+		sel.Progressive = true
+		return sel
 	}
 	af, _ := v.CurrentAudio()
-	return vf.ID + "+" + af.ID, container
+	sel.Spec = vf.ID + "+" + af.ID
+	sel.ABRCeiling = int(af.ABR)
+	if sel.ABRCeiling == 0 {
+		sel.ABRCeiling = int(af.TBR)
+	}
+	return sel
 }
 
 func hasAudioPick(v VCRAnimation) bool { return len(v.audioFormats) > 0 }
