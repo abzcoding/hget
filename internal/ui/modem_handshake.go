@@ -11,7 +11,7 @@ const modemDeviceWidth = 50 // outer modem chassis width
 
 // modemHandshake renders an animated dial-up modem connection sequence.
 type modemHandshake struct {
-	frame int
+	frame int // animation frame counter
 	phase int // 0=dialing 1=carrier 2=handshake 3=connected
 	mf    mainframe
 	width int
@@ -25,6 +25,7 @@ func newModemHandshake() modemHandshake {
 
 func (m *modemHandshake) SetWidth(w int) { m.width = w }
 func (m modemHandshake) Phase() int      { return m.phase }
+func (m modemHandshake) Frame() int      { return m.frame }
 
 func (m *modemHandshake) Tick() {
 	m.frame++

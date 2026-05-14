@@ -75,6 +75,9 @@ func (v *verifyAnimation) SetBreached(d VerifyDetails) {
 // Mode returns the current operational mode.
 func (v verifyAnimation) Mode() vaultMode { return v.mode }
 
+// Frame returns the current animation frame counter.
+func (v verifyAnimation) Frame() int { return v.frame }
+
 func (v *verifyAnimation) Tick() {
 	v.frame++
 	v.keyFrame = (v.frame / 3) % 4

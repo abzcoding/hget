@@ -14,8 +14,8 @@ import (
 	"github.com/charmbracelet/bubbles/progress"
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/harmonica"
 	"github.com/charmbracelet/glamour"
+	"github.com/charmbracelet/harmonica"
 	"github.com/charmbracelet/huh"
 	"github.com/charmbracelet/lipgloss"
 	charmlog "github.com/charmbracelet/log"
@@ -116,10 +116,10 @@ var (
 			Foreground(colorSteel).
 			Background(lipgloss.Color("#1B2230")).
 			Padding(0, 1)
-	styleDone      = lipgloss.NewStyle().Foreground(colorGreen).Bold(true)
-	styleETA       = lipgloss.NewStyle().Foreground(colorYellow)
-	styleError     = lipgloss.NewStyle().Foreground(colorRed).Bold(true)
-	styleErrBox    = lipgloss.NewStyle().
+	styleDone   = lipgloss.NewStyle().Foreground(colorGreen).Bold(true)
+	styleETA    = lipgloss.NewStyle().Foreground(colorYellow)
+	styleError  = lipgloss.NewStyle().Foreground(colorRed).Bold(true)
+	styleErrBox = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(colorRed).
 			Padding(0, 2).
@@ -223,6 +223,32 @@ type StoppingMsg struct {
 
 // SkippingMsg overlays a "skipping" panel for the current batch item.
 type SkippingMsg struct{}
+
+// BatchItemBeginMsg signals the start of a new item inside a persistent
+// batch TUI program.  The model resets per-item state but keeps the SAN
+// cabinet, history, and program alive (no alt-screen toggling).
+type BatchItemBeginMsg struct {
+	Index    int // 0-based index into the batch
+	URL      string
+	FileName string
+}
+
+// BatchItemEndMsg signals an item finished (success / fail / skip / abort).
+// Updates the SAN bay status without quitting the program.
+type BatchItemEndMsg struct {
+	Index  int
+	Status BatchItemStatus
+	Reason string
+}
+
+// BatchFinishedMsg signals all items have run; render the final summary
+// frame and auto-quit.
+type BatchFinishedMsg struct {
+	Done    int
+	Failed  int
+	Skipped int
+	Aborted int
+}
 
 // ── Per-part model ────────────────────────────────────────────────────────────
 
@@ -347,6 +373,16 @@ type tuiModel struct {
 	// terminal dimensions
 	width  int
 	height int
+
+	// batchMode — set when this TUI session drives an entire batch via a
+	// single persistent tea.Program.  When true, DownloadDoneMsg and
+	// DownloadErrorMsg do NOT auto-quit; the wrapping goroutine moves to
+	// the next item by sending BatchItemBeginMsg.
+	batchMode bool
+
+	// final batch summary, populated on BatchFinishedMsg.
+	batchFinished                                                          bool
+	batchFinalDone, batchFinalFailed, batchFinalSkipped, batchFinalAborted int
 }
 
 // ── Layout tiers ──────────────────────────────────────────────────────────────
@@ -678,7 +714,14 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.mf.SetState(mfState)
 		m.bus.SetState(busState)
 		m.tape.SetState(tpState)
-		m.tape.Update(m.overallPct, totalSpeed, m.peakSpeed)
+		// During assembly the tape fill-bar tracks joinPct so the strip
+		// visually rewinds from full to 0 and back to full as parts
+		// merge, matching the LINK aggregate bar.
+		tapePct := m.overallPct
+		if m.joining {
+			tapePct = math.Min(m.joinPct, 1.0)
+		}
+		m.tape.Update(tapePct, totalSpeed, m.peakSpeed)
 		m.mf.Tick()
 		m.bus.Tick(rateRatio)
 		m.tape.Tick()
@@ -889,6 +932,9 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case DownloadDoneMsg:
 		m.done = true
+		if m.batchMode {
+			return m, nil
+		}
 		return m, autoQuitCmd()
 
 	case DownloadErrorMsg:
@@ -897,6 +943,9 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if isSkip {
 			m.skipping = true // make the scene primitives stay disconnected
 			m.skipped = true
+			if m.batchMode {
+				return m, nil
+			}
 			return m, autoQuitCmd()
 		}
 		m.hasError = true
@@ -905,6 +954,74 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.errMsg = "unknown error"
 		}
+		if m.batchMode {
+			return m, nil
+		}
+		return m, autoQuitCmd()
+
+	case BatchItemBeginMsg:
+		// Reset per-item state — but keep the SAN, history, dimensions,
+		// and batchMode intact.  This is the seam between items inside a
+		// single persistent tea.Program.
+		m.url = msg.URL
+		m.fileName = msg.FileName
+		m.size = 0
+		m.ips = nil
+		m.parts = nil
+		m.totalDown = 0
+		m.peakSpeed = 0
+		m.speedHistory = m.speedHistory[:0]
+		// Start the elapsed clock now so the data-link panel's stats
+		// row reads sensibly during the inter-item handshake before
+		// DownloadStartMsg arrives.  DownloadStartMsg will overwrite it.
+		m.startTime = time.Now()
+		m.overallPct = 0
+		m.overallVel = 0
+		m.joinPct = 0
+		m.joinVel = 0
+		m.started = false
+		m.done = false
+		m.hasError = false
+		m.errMsg = ""
+		m.skipping = false
+		m.skipped = false
+		m.stopping = false
+		m.stoppingReason = ""
+		m.joining = false
+		m.joinCurrent = 0
+		m.joinTotal = 0
+		m.verifying = false
+		m.verifyDone = false
+		m.verifyOK = false
+		m.verifyDetail = ""
+		m.logs = m.logs[:0]
+		m.batchCurrent = msg.Index + 1
+		// Re-init animations so each item starts with a fresh handshake.
+		m.modem = newModemHandshake()
+		m.link = newDataLink()
+		m.tape = newTape(tapeLabelFor(m.batchCurrent))
+		if m.hasSan && msg.Index >= 0 && msg.Index < len(m.sanView.items) {
+			if msg.FileName != "" {
+				m.sanView.items[msg.Index].Label = msg.FileName
+			}
+			m.sanView.items[msg.Index].Status = sanActive
+			m.sanView.SetActive(msg.Index)
+		}
+		return m, nil
+
+	case BatchItemEndMsg:
+		if m.hasSan && msg.Index >= 0 && msg.Index < len(m.sanView.items) {
+			m.sanView.items[msg.Index].Status = sanStatusFromBatch(msg.Status)
+		}
+		return m, nil
+
+	case BatchFinishedMsg:
+		m.batchFinished = true
+		m.batchFinalDone = msg.Done
+		m.batchFinalFailed = msg.Failed
+		m.batchFinalSkipped = msg.Skipped
+		m.batchFinalAborted = msg.Aborted
+		m.done = true
 		return m, autoQuitCmd()
 
 	case autoQuitMsg:
@@ -968,7 +1085,7 @@ func (m tuiModel) View() string {
 	// Header — during the active download phase, render the animated
 	// data-link panel (which absorbs per-channel + aggregate readouts).
 	// Otherwise fall back to the wordmark banner.
-	useLink := m.started && !m.done && !m.hasError && !m.joining && w >= dataLinkInnerW+4
+	useLink := m.started && !m.done && !m.hasError && w >= dataLinkInnerW+4
 	if !useLink {
 		b.WriteString(styleBanner.Render(banner))
 		b.WriteString("\n")
@@ -1001,8 +1118,18 @@ func (m tuiModel) View() string {
 			Render(batchLine) + "\n\n")
 	}
 
-	// Pre-start spinner.
-	if !m.started && !m.hasError {
+	// Batch summary screen — final frame shown after every item has run.
+	if m.batchFinished {
+		return m.renderBatchSummary(sep)
+	}
+
+	// Pre-start spinner — used only for the very first frame of a
+	// single-item session.  In batch mode we never take this branch
+	// (even before the first DownloadStartMsg arrives) so the data-link
+	// scene stays mounted across the whole batch — the inner stage
+	// just transitions from HANDSHAKE → DOWNLOADING → ASSEMBLING as
+	// each item runs, without ever replacing the panel itself.
+	if !m.started && !m.batchMode && !m.hasError {
 		modemView := m.modem.View(m.url)
 		for _, line := range strings.Split(modemView, "\n") {
 			b.WriteString(line + "\n")
@@ -1018,12 +1145,12 @@ func (m tuiModel) View() string {
 		return b.String()
 	}
 
-	if m.skipped {
+	if m.skipped && !m.batchMode {
 		return m.renderSkipScreen(sep)
 	}
 
 	// Error screen.
-	if m.hasError {
+	if m.hasError && !m.batchMode {
 		// Build channel state at error point
 		channels := make([]channelRow, len(m.parts))
 		for i, p := range m.parts {
@@ -1078,7 +1205,7 @@ func (m tuiModel) View() string {
 	b.WriteString("\n" + sep + "\n\n")
 
 	// Completion screen.
-	if m.done && !m.joining {
+	if m.done && !m.joining && !m.batchMode {
 		// Build final channel state (all at 100%)
 		channels := make([]channelRow, len(m.parts))
 		for i := range m.parts {
@@ -1138,7 +1265,11 @@ func (m tuiModel) View() string {
 	}
 
 	// Verifying phase (download+join complete, waiting for GPG result).
-	if m.verifying && !m.done {
+	// In single-item mode we replace the scene with the full vault panel.
+	// In batch mode we keep the data-link scene mounted (status flips to
+	// VERIFYING, with an inline indicator below the panel) so there is
+	// no jumpscare between items.
+	if m.verifying && !m.done && !m.batchMode {
 		vaultPad := (w - vaultWidth) / 2
 		if vaultPad < 0 {
 			vaultPad = 0
@@ -1159,81 +1290,166 @@ func (m tuiModel) View() string {
 		return b.String()
 	}
 
-	// Join phase.
-	if m.joining {
-		// Animated join box
-		pct := math.Min(m.joinPct, 1.0)
-		joinView := m.joinAnim.View(pct, m.joinCurrent, m.joinTotal)
-		for _, line := range strings.Split(joinView, "\n") {
-			b.WriteString(line + "\n")
-		}
-		b.WriteString("\n" + sep + "\n")
-	} else {
-		// Build per-channel rows for the data-link panel.
-		channels := make([]channelRow, len(m.parts))
-		for i, p := range m.parts {
-			rawPct := 0.0
-			if p.total > 0 {
-				rawPct = math.Min(float64(p.downloaded)/float64(p.total), 1.0)
-			}
-			if p.done {
-				rawPct = 1.0
-			}
+	// Build per-channel rows for the data-link panel.  During the join
+	// phase the channels are "absorbed" into the aggregate — they keep
+	// their slot but render as DONE so the layout stays identical.
+	//
+	// In batch mode, between items, m.parts may be empty (the next
+	// item's range probe hasn't returned yet).  We synthesize
+	// placeholder rows from m.numConns so the panel's height never
+	// collapses — only the LEDs and bars animate.
+	partCount := len(m.parts)
+	placeholders := partCount == 0 && m.batchMode && m.numConns > 0
+	if placeholders {
+		partCount = m.numConns
+	}
+	channels := make([]channelRow, partCount)
+	for i := 0; i < partCount; i++ {
+		if placeholders {
 			channels[i] = channelRow{
 				Index:      i,
-				Pct:        math.Max(0, math.Min(p.smoothPct, 1.0)),
-				RawPct:     rawPct,
-				Speed:      p.speed,
-				Done:       p.done,
-				HasStarted: p.downloaded > 0,
+				Pct:        0,
+				RawPct:     0,
+				Speed:      0,
+				Done:       false,
+				HasStarted: false,
 			}
+			continue
 		}
-
-		// Compose link status word from lifecycle state.
-		status := "downloading"
-		online := true
-		switch {
-		case m.stopping:
-			status = "STOPPING"
-			online = false
-		case m.skipping:
-			status = "SKIPPING"
-			online = false
-		case m.verifying:
-			status = "DOWNLOADING"
-		case m.totalDown == 0:
-			status = "HANDSHAKE"
-			online = false
-		default:
-			status = "DOWNLOADING"
+		p := m.parts[i]
+		rawPct := 0.0
+		if p.total > 0 {
+			rawPct = math.Min(float64(p.downloaded)/float64(p.total), 1.0)
 		}
-
-		linkView := m.link.View(channels, m.totalDown, m.size, m.peakSpeed,
-			time.Since(m.startTime), status, online)
-		// Centre the panel in the terminal.
-		pad := (w - dataLinkInnerW - 2) / 2
-		if pad < 0 {
-			pad = 0
+		if p.done {
+			rawPct = 1.0
 		}
-		padStr := strings.Repeat(" ", pad)
-
-		tier := m.computeTier()
-		switch {
-		case m.batchTotal > 1 && m.hasSan && tier >= tierTapeOnly:
-			m.sanView.SetCompact(tier < tierFull)
-			for _, line := range strings.Split(m.sanView.View(), "\n") {
-				b.WriteString(line + "\n")
-			}
-			b.WriteString("\n")
-		case tier > tierMinimal:
-			b.WriteString(m.renderMainframeScene())
+		done := p.done
+		smoothPct := p.smoothPct
+		if m.joining {
+			// During assembly, channels gradually flip "absorbed" left-to-right
+			// as merging proceeds.  Visually shows parts being consumed into
+			// the output stream.
+			done = true
+			rawPct = 1.0
+			smoothPct = 1.0
 		}
-
-		for _, line := range strings.Split(linkView, "\n") {
-			b.WriteString(padStr + line + "\n")
+		channels[i] = channelRow{
+			Index:      i,
+			Pct:        math.Max(0, math.Min(smoothPct, 1.0)),
+			RawPct:     rawPct,
+			Speed:      p.speed,
+			Done:       done,
+			HasStarted: p.downloaded > 0,
 		}
+	}
 
-		// Sparkline beneath the link panel — recent throughput history.
+	// Compose link status word from lifecycle state.
+	status := "DOWNLOADING"
+	online := true
+	switch {
+	case m.stopping:
+		status = "STOPPING"
+		online = false
+	case m.skipping:
+		status = "SKIPPING"
+		online = false
+	case m.verifying:
+		// Verification only enters the data-link scene path in batch
+		// mode (single-item mode short-circuits above).
+		status = "VERIFYING"
+	case m.joining:
+		status = "ASSEMBLING"
+	case placeholders, !m.started, m.totalDown == 0:
+		status = "HANDSHAKE"
+		online = false
+	default:
+		status = "DOWNLOADING"
+	}
+
+	// During assembly, override the LINK aggregate bar to track joinPct
+	// so the bar replays from 0→100% as merging proceeds.  Channels are
+	// already at 100% so the previous totalDown==size would pin it full.
+	linkTotal := m.totalDown
+	linkSize := m.size
+	if m.joining {
+		// Use a synthetic size pair so the aggregate bar reflects joinPct.
+		linkSize = int64(len(m.parts))
+		if linkSize < 1 {
+			linkSize = 1
+		}
+		linkTotal = int64(math.Round(math.Min(m.joinPct, 1.0) * float64(linkSize)))
+	}
+
+	linkView := m.link.View(channels, linkTotal, linkSize, m.peakSpeed,
+		time.Since(m.startTime), status, online)
+	// Centre the panel in the terminal.
+	pad := (w - dataLinkInnerW - 2) / 2
+	if pad < 0 {
+		pad = 0
+	}
+	padStr := strings.Repeat(" ", pad)
+
+	tier := m.computeTier()
+	switch {
+	case m.batchTotal > 1 && m.hasSan && tier >= tierTapeOnly:
+		m.sanView.SetCompact(tier < tierFull)
+		for _, line := range strings.Split(m.sanView.View(), "\n") {
+			b.WriteString(line + "\n")
+		}
+		b.WriteString("\n")
+	case tier > tierMinimal:
+		b.WriteString(m.renderMainframeScene())
+	}
+
+	for _, line := range strings.Split(linkView, "\n") {
+		b.WriteString(padStr + line + "\n")
+	}
+
+	// Below the data-link panel: a single status line whose content
+	// reflects the current phase.  Keeping the line present (rather
+	// than appearing/disappearing) prevents vertical layout shifts
+	// between phases — only the contents animate.
+	spinners := []string{"◐", "◓", "◑", "◒"}
+	dimStyle := lipgloss.NewStyle().Foreground(colorSteel)
+	switch {
+	case m.joining:
+		mergeStyle := lipgloss.NewStyle().Foreground(colorAmber).Bold(true)
+		spin := mergeStyle.Render(spinners[m.joinAnim.frame%len(spinners)])
+		cur := m.joinCurrent
+		if cur < 1 {
+			cur = 1
+		}
+		if cur > m.joinTotal {
+			cur = m.joinTotal
+		}
+		line := "  " + spin + "  " +
+			mergeStyle.Render("ASSEMBLING") + "  " +
+			dimStyle.Render(fmt.Sprintf("part %d of %d  ·  %.1f%%",
+				cur, m.joinTotal, math.Min(m.joinPct, 1.0)*100))
+		b.WriteString("\n" + padStr + line + "\n")
+	case m.verifying && m.batchMode:
+		vStyle := lipgloss.NewStyle().Foreground(colorPhosphor).Bold(true)
+		spin := vStyle.Render(spinners[(m.verifyAnim.Frame())%len(spinners)])
+		line := "  " + spin + "  " +
+			vStyle.Render("VERIFYING") + "  " +
+			dimStyle.Render("checking signature")
+		b.WriteString("\n" + padStr + line + "\n")
+	case placeholders || (!m.started && m.batchMode):
+		// Inter-item handshake — the next item's range probe is in
+		// flight.  A muted "preparing next transfer" placeholder keeps
+		// the row populated so the panel doesn't appear to flicker.
+		hStyle := lipgloss.NewStyle().Foreground(colorPhosphor)
+		spin := hStyle.Render(spinners[(m.modem.Frame())%len(spinners)])
+		label := "preparing next transfer"
+		if m.fileName != "" {
+			label = "preparing  " + m.fileName
+		}
+		line := "  " + spin + "  " +
+			hStyle.Render("HANDSHAKE") + "  " +
+			dimStyle.Render(label)
+		b.WriteString("\n" + padStr + line + "\n")
+	default:
 		if spark := m.renderSparkline(); spark != "" {
 			peakLabel := lipgloss.NewStyle().Foreground(colorSteel).Render("peak " + formatBytes(int64(m.peakSpeed)) + "/s")
 			rateLabel := lipgloss.NewStyle().Foreground(colorSteel).Render("rate ↗ ")
@@ -1588,6 +1804,85 @@ func (m tuiModel) renderSkipScreen(sep string) string {
 	} else if m.batchTotal > 1 {
 		b.WriteString("    " + styleLabel.Render("next") + " " +
 			lipgloss.NewStyle().Foreground(colorSteel).Render("(end of batch)") + "\n")
+	}
+
+	b.WriteString("\n" + sep + "\n")
+	b.WriteString(styleHelp.Render("  closing in 3 s  •  ") +
+		styleHelpKey.Render("q") + styleHelp.Render(" quit now"))
+	return b.String()
+}
+
+// renderBatchSummary renders the final, single-frame summary that closes
+// out a batch run inside the persistent TUI program.  The SAN cabinet
+// stays on screen so the user sees the full lifecycle at a glance, with a
+// tally row underneath.
+func (m tuiModel) renderBatchSummary(sep string) string {
+	var b strings.Builder
+	w := m.width
+	if w == 0 {
+		w = 80
+	}
+
+	// Banner header so the closing frame matches the opening aesthetic.
+	b.WriteString(styleBanner.Render(banner) + "\n")
+	b.WriteString(lipgloss.NewStyle().Foreground(colorSteel).Render(bannerStrap) + "\n")
+	b.WriteString(lipgloss.NewStyle().Foreground(colorPhosphor).
+		Render(strings.Repeat("═", sepWidth(w))) + "\n\n")
+
+	// SAN cabinet — full lifecycle for every bay.
+	if m.hasSan {
+		tier := m.computeTier()
+		m.sanView.SetCompact(tier < tierFull)
+		for _, line := range strings.Split(m.sanView.View(), "\n") {
+			b.WriteString(line + "\n")
+		}
+		b.WriteString("\n")
+	}
+
+	// Tally row.
+	total := len(m.sanView.items)
+	if total == 0 {
+		total = m.batchFinalDone + m.batchFinalFailed + m.batchFinalSkipped + m.batchFinalAborted
+	}
+	tally := func(label string, n int, sty lipgloss.Style) string {
+		if n == 0 {
+			return ""
+		}
+		return sty.Render(fmt.Sprintf("%d %s", n, label))
+	}
+	parts := []string{}
+	mintB := lipgloss.NewStyle().Foreground(colorMint).Bold(true)
+	amberB := lipgloss.NewStyle().Foreground(colorAmber).Bold(true)
+	magB := lipgloss.NewStyle().Foreground(colorMagenta).Bold(true)
+	if s := tally("done", m.batchFinalDone, mintB); s != "" {
+		parts = append(parts, s)
+	}
+	if s := tally("skipped", m.batchFinalSkipped, amberB); s != "" {
+		parts = append(parts, s)
+	}
+	if s := tally("failed", m.batchFinalFailed, magB); s != "" {
+		parts = append(parts, s)
+	}
+	if s := tally("aborted", m.batchFinalAborted, amberB); s != "" {
+		parts = append(parts, s)
+	}
+	dot := styleSep.Render("  ·  ")
+	tallyLine := strings.Join(parts, dot)
+
+	var head string
+	switch {
+	case m.batchFinalAborted > 0 && m.batchFinalFailed == 0:
+		head = amberB.Render("⊘ BATCH ABORTED")
+	case m.batchFinalFailed == 0:
+		head = mintB.Render("⬢ BATCH COMPLETE")
+	default:
+		head = magB.Render("◈ BATCH FINISHED WITH ERRORS")
+	}
+	b.WriteString("  " + head + "\n")
+	if tallyLine != "" {
+		b.WriteString("  " + styleSep.Render("│") + "  " + tallyLine + "  " +
+			styleSep.Render("│") + "  " +
+			lipgloss.NewStyle().Foreground(colorSteel).Render(fmt.Sprintf("%d total", total)) + "\n")
 	}
 
 	b.WriteString("\n" + sep + "\n")

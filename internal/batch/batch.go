@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
@@ -16,6 +17,14 @@ import (
 	"github.com/abzcoding/hget/internal/ui"
 	"github.com/abzcoding/hget/internal/util"
 )
+
+type prepItem struct {
+	url         string
+	file        string
+	preSkip     bool // user declined re-download during upfront prompt
+	skipReason  string
+	resumeState *state.State
+}
 
 func RunBatchDownloads(ctx context.Context, filePath string, conn int, skiptls bool, proxy, bwLimit string, timeout time.Duration, verify bool) {
 	// ── Read and validate URL list ────────────────────────────────────────────
@@ -39,379 +48,139 @@ func RunBatchDownloads(ctx context.Context, filePath string, conn int, skiptls b
 		ui.ShowMessage(ui.MessageError, "READ ERROR", fmt.Sprintf("Error reading file: %s\n%v", filePath, scanErr))
 		return
 	}
-
 	if len(urls) == 0 {
 		ui.ShowMessage(ui.MessageWarning, "EMPTY FILE", fmt.Sprintf("No URLs found in: %s", filePath))
 		return
 	}
 
-	// ── Palette & styles — drawn from the central ui.Theme ───────────────────
-	cPhosphor := ui.Theme.Phosphor
-	cAmber := ui.Theme.Amber
-	cMint := ui.Theme.Mint
-	cMagenta := ui.Theme.Magenta
-	cSteel := ui.Theme.Steel
-	cSlate := ui.Theme.Slate
-	cFrost := ui.Theme.Frost
+	// ── Phase 1: collect every user decision up-front (overwrite, resume) ────
+	prep := prepareBatch(urls, verify)
 
-	styleSep := lipgloss.NewStyle().Foreground(cSlate)
-	styleCounter := lipgloss.NewStyle().Foreground(cAmber).Bold(true)
-	styleFile := lipgloss.NewStyle().Foreground(cFrost).Bold(true)
-	styleURL := lipgloss.NewStyle().Foreground(cSteel)
-	styleDone := lipgloss.NewStyle().Foreground(cMint).Bold(true)
-	styleFail := lipgloss.NewStyle().Foreground(cMagenta).Bold(true)
-	styleSkip := lipgloss.NewStyle().Foreground(cAmber)
-	styleAbort := lipgloss.NewStyle().Foreground(cAmber).Bold(true)
-	stylePending := lipgloss.NewStyle().Foreground(cSteel)
-	styleActive := lipgloss.NewStyle().Foreground(cPhosphor).Bold(true)
-	styleMuted := lipgloss.NewStyle().Foreground(cSteel)
-	styleBox := lipgloss.NewStyle().
-		Border(lipgloss.NormalBorder(), false, false, false, true).
-		BorderForeground(cAmber).
-		Padding(0, 0, 0, 2).
-		Foreground(cFrost)
-
-	const sepW = 68
-	sep := styleSep.Render(strings.Repeat("┄", sepW))
-
-	type item struct {
-		url    string
-		file   string
-		status itemStatus
-		reason string
+	// Build the SAN seed list (one bay per URL) and a parallel URL list.
+	seed := make([]ui.BatchItemSnapshot, len(prep))
+	urlList := make([]string, len(prep))
+	for i, p := range prep {
+		status := ui.BatchItemQueued
+		if p.preSkip {
+			status = ui.BatchItemSkipped
+		}
+		seed[i] = ui.BatchItemSnapshot{Label: p.file, Status: status}
+		urlList[i] = p.url
 	}
 
-	items := make([]item, len(urls))
-	for i, u := range urls {
-		items[i] = item{url: u, file: util.TaskFromURL(u), status: statusPending}
+	// ── Phase 2: single persistent TUI drives every download ─────────────────
+	var (
+		mu            sync.Mutex
+		currentCancel func(error)
+	)
+	skipCurrent := func() {
+		mu.Lock()
+		defer mu.Unlock()
+		if currentCancel != nil {
+			currentCancel(downloader.ErrSkipCurrent)
+		}
+	}
+	quitBatch := func() {
+		mu.Lock()
+		defer mu.Unlock()
+		if currentCancel != nil {
+			currentCancel(downloader.ErrAbortBatch)
+		}
 	}
 
-	// printQueuePanel renders the current queue state to stdout.
-	printQueuePanel := func(activeIdx int) {
-		done, failed, skipped, aborted := 0, 0, 0, 0
-		for _, it := range items {
-			switch it.status {
-			case statusDone:
-				done++
-			case statusFailed:
-				failed++
-			case statusSkipped:
-				skipped++
-			case statusAborted:
-				aborted++
+	runItem := func(idx int) ui.BatchItemResult {
+		pi := prep[idx]
+		itemCtx, cancelItem := context.WithCancelCause(ctx)
+		mu.Lock()
+		currentCancel = cancelItem
+		mu.Unlock()
+		defer func() {
+			mu.Lock()
+			currentCancel = nil
+			mu.Unlock()
+			cancelItem(nil)
+		}()
+
+		if err := downloader.Execute(itemCtx, pi.url, pi.resumeState, conn, skiptls, proxy, bwLimit, timeout); err != nil {
+			switch {
+			case errors.Is(err, downloader.ErrSkipCurrent):
+				return ui.BatchItemResult{Status: ui.BatchItemSkipped, Reason: "user skipped"}
+			case errors.Is(err, downloader.ErrAbortBatch):
+				return ui.BatchItemResult{Status: ui.BatchItemAborted, Reason: "user aborted"}
+			case errors.Is(err, context.Canceled):
+				return ui.BatchItemResult{Status: ui.BatchItemAborted, Reason: "cancelled"}
+			default:
+				return ui.BatchItemResult{Status: ui.BatchItemFailed, Reason: err.Error()}
 			}
-		}
-		remaining := len(items) - done - failed - skipped - aborted
-		if activeIdx >= 0 {
-			remaining-- // the active one is not "remaining"
-		}
-		if remaining < 0 {
-			remaining = 0
-		}
-
-		hdr := fmt.Sprintf("  Batch  ·  %d file", len(items))
-		if len(items) != 1 {
-			hdr += "s"
 		}
 		if verify {
-			hdr += "  ·  verify on"
-		}
-		if done > 0 {
-			hdr += fmt.Sprintf("  ·  %d done", done)
-		}
-		if skipped > 0 {
-			hdr += fmt.Sprintf("  ·  %d skipped", skipped)
-		}
-		if failed > 0 {
-			hdr += fmt.Sprintf("  ·  %d failed", failed)
-		}
-		if aborted > 0 {
-			hdr += fmt.Sprintf("  ·  %d aborted", aborted)
-		}
-		if remaining > 0 {
-			hdr += fmt.Sprintf("  ·  %d left", remaining)
-		}
-		fmt.Println()
-		fmt.Println(styleBox.Render(hdr))
-		fmt.Println()
-
-		iconCol := lipgloss.NewStyle().Width(3) // 1-cell glyph + 1 pad → 3
-		nameCol := lipgloss.NewStyle().Width(40)
-
-		// Rune-safe truncation that respects Unicode display width.
-		truncName := func(s string) string {
-			if lipgloss.Width(s) <= 39 {
-				return s
+			ok, detail := downloader.RunVerify(itemCtx, pi.url, skiptls, proxy, timeout)
+			if !ok {
+				return ui.BatchItemResult{Status: ui.BatchItemFailed, Reason: "signature: " + detail}
 			}
-			out := make([]rune, 0, 40)
-			width := 0
-			for _, r := range s {
-				rw := lipgloss.Width(string(r))
-				if width+rw > 38 {
-					break
-				}
-				out = append(out, r)
-				width += rw
-			}
-			return string(out) + "…"
 		}
-
-		for i, it := range items {
-			var glyph, nameStr, statusStr string
-			fname := truncName(it.file)
-			switch it.status {
-			case statusDone:
-				glyph = styleDone.Render("⬢")
-				nameStr = styleDone.Render(fname)
-				statusStr = styleDone.Render("done")
-			case statusFailed:
-				glyph = styleFail.Render("◈")
-				nameStr = styleFail.Render(fname)
-				statusStr = styleFail.Render("failed")
-				if it.reason != "" {
-					statusStr += "  " + styleMuted.Render("("+truncateSummary(it.reason, 35)+")")
-				}
-			case statusSkipped:
-				glyph = styleSkip.Render("⤳")
-				nameStr = styleSkip.Render(fname)
-				statusStr = styleSkip.Render("skipped")
-				if it.reason != "" {
-					statusStr += "  " + styleMuted.Render("("+truncateSummary(it.reason, 35)+")")
-				}
-			case statusAborted:
-				glyph = styleAbort.Render("⊘")
-				nameStr = styleAbort.Render(fname)
-				statusStr = styleAbort.Render("aborted")
-			case statusActive:
-				glyph = styleActive.Render("◉")
-				nameStr = styleActive.Render(fname)
-				statusStr = styleActive.Render(fmt.Sprintf("downloading  [%02d/%02d]", i+1, len(items)))
-			default:
-				glyph = stylePending.Render("◯")
-				nameStr = stylePending.Render(fname)
-				statusStr = stylePending.Render("queued")
-			}
-			fmt.Printf("  %s %s  %s\n",
-				iconCol.Render(glyph),
-				nameCol.Render(nameStr),
-				statusStr,
-			)
-		}
-		fmt.Println()
-		fmt.Println(sep)
+		return ui.BatchItemResult{Status: ui.BatchItemDone}
 	}
 
-	// ── Per-URL download loop ─────────────────────────────────────────────────
-	for i := range items {
-		// Honour an external abort (SIGINT, q during a previous item, etc.)
-		// before starting the next download.
-		if ctx.Err() != nil {
-			for j := i; j < len(items); j++ {
-				if items[j].status == statusPending {
-					items[j].status = statusAborted
-				}
-			}
-			break
+	summary, _ := ui.RunBatch(ui.BatchRunOptions{
+		Ctx:           ctx,
+		NumConns:      conn,
+		WillVerify:    verify,
+		Items:         seed,
+		URLs:          urlList,
+		OnQuit:        quitBatch,
+		OnSkipCurrent: skipCurrent,
+	}, runItem)
+
+	// ── Phase 3: post-TUI line summary (logger handles its own colouring) ────
+	cMint := ui.Theme.Mint
+	cMag := ui.Theme.Magenta
+	cAmber := ui.Theme.Amber
+
+	total := len(prep)
+	switch {
+	case summary.Aborted > 0 && summary.Failed == 0:
+		fmt.Println(lipgloss.NewStyle().Foreground(cAmber).Bold(true).
+			Render(fmt.Sprintf("  ⊘  aborted — %d/%d completed", summary.Done+summary.Skipped, total)))
+	case summary.Failed == 0:
+		fmt.Println(lipgloss.NewStyle().Foreground(cMint).Bold(true).
+			Render(fmt.Sprintf("  ⬢  %d/%d transfers complete", summary.Done+summary.Skipped, total)))
+	default:
+		extra := ""
+		if summary.Aborted > 0 {
+			extra = fmt.Sprintf(", %d aborted", summary.Aborted)
 		}
+		fmt.Println(lipgloss.NewStyle().Foreground(cMag).Bold(true).
+			Render(fmt.Sprintf("  ◈  %d/%d failed%s", summary.Failed, total, extra)))
+	}
+}
 
-		it := &items[i]
-		it.status = statusActive
-		printQueuePanel(i)
+func prepareBatch(urls []string, verify bool) []prepItem {
+	_ = verify
+	out := make([]prepItem, len(urls))
+	for i, u := range urls {
+		out[i] = prepItem{url: u, file: util.TaskFromURL(u)}
 
-		var itemReason string
-
-		fmt.Printf("\n  %s  %s\n",
-			styleCounter.Render(fmt.Sprintf("◉ %02d / %02d", i+1, len(items))),
-			styleFile.Render(it.file),
-		)
-		fmt.Println(styleURL.Render("  ╰─ " + it.url))
-		fmt.Println()
-
-		// File-exists check (isatty gate is inside ui.ConfirmRedownload).
-		if _, statErr := os.Stat(it.file); statErr == nil {
-			if !ui.ConfirmRedownload(it.file) {
-				ui.ShowMessage(ui.MessageInfo, "FILE EXISTS", fmt.Sprintf("Skipping: %s", it.file))
-				it.status = statusSkipped
-				it.reason = "already exists"
-				if verify {
-					ok, detail := downloader.RunVerify(ctx, it.url, skiptls, proxy, timeout)
-					ui.PrintVerifySummary(ok, detail)
-					if !ok {
-						it.status = statusFailed
-						it.reason = detail
-					}
-				}
-				fmt.Println()
+		// File-exists prompt (huh inline form — no alt-screen).
+		if _, statErr := os.Stat(out[i].file); statErr == nil {
+			if !ui.ConfirmRedownload(out[i].file) {
+				out[i].preSkip = true
+				out[i].skipReason = "already exists"
 				continue
 			}
-			// User wants to redownload — clean up any partial state
-			if util.ExistDir(state.FolderOf(it.url)) {
-				if rmErr := os.RemoveAll(state.FolderOf(it.url)); rmErr != nil {
+			// User chose to overwrite — wipe any stale per-URL state.
+			if util.ExistDir(state.FolderOf(u)) {
+				if rmErr := os.RemoveAll(state.FolderOf(u)); rmErr != nil {
 					ui.Warnf("Could not remove old state: %v\n", rmErr)
 				}
 			}
 		}
 
-		// Check for resumable partial download
-		var st *state.State
-		if state.Exists(it.url) {
-			st, _ = state.PromptResume(it.url)
-		}
-
-		// Per-item context derived from the batch context, with cancel
-		// causes to distinguish skip vs abort.
-		itemCtx, cancelItem := context.WithCancelCause(ctx)
-
-		var verifyOK bool
-		var verifyDetail string
-		var didVerify bool
-
-		history := make([]ui.BatchItemSnapshot, len(items))
-		for j, h := range items {
-			history[j] = ui.BatchItemSnapshot{
-				Label:  h.file,
-				Status: itemStatusToBatch(h.status),
-			}
-		}
-
-		runErr := ui.RunWithTUI(ui.RunOptions{
-			Ctx: itemCtx,
-			OnSkip: func() {
-				cancelItem(downloader.ErrSkipCurrent)
-			},
-			OnQuit: func() {
-				// 'q' in batch mode aborts the entire batch — cancel the
-				// parent context indirectly by cancelling this item with
-				// ErrAbortBatch and signalling the outer loop below.
-				cancelItem(downloader.ErrAbortBatch)
-			},
-			NumConns:     conn,
-			WillVerify:   verify,
-			BatchCurrent: i + 1,
-			BatchTotal:   len(items),
-			BatchHistory: history,
-		}, func() error {
-			if err := downloader.Execute(itemCtx, it.url, st, conn, skiptls, proxy, bwLimit, timeout); err != nil {
-				return err
-			}
-			if verify {
-				verifyOK, verifyDetail = downloader.RunVerify(itemCtx, it.url, skiptls, proxy, timeout)
-				didVerify = true
-				if !verifyOK {
-					return fmt.Errorf("signature: %s", verifyDetail)
-				}
-			}
-			return nil
-		})
-		cancelItem(nil) // release goroutine in WithCancelCause
-
-		if didVerify {
-			ui.PrintVerifySummary(verifyOK, verifyDetail)
-		}
-
-		// Classify the outcome.
-		switch {
-		case runErr == nil:
-			it.status = statusDone
-		case errors.Is(runErr, downloader.ErrSkipCurrent):
-			it.status = statusSkipped
-			it.reason = "user skipped"
-		case errors.Is(runErr, downloader.ErrAbortBatch):
-			it.status = statusAborted
-			it.reason = "user aborted"
-			// Mark all remaining as aborted and break.
-			for j := i + 1; j < len(items); j++ {
-				items[j].status = statusAborted
-			}
-			itemReason = ""
-			fmt.Println()
-			printQueuePanel(-1)
-			return
-		case errors.Is(runErr, context.Canceled):
-			it.status = statusAborted
-			it.reason = "cancelled"
-		default:
-			it.status = statusFailed
-			itemReason = runErr.Error()
-			it.reason = itemReason
-		}
-		fmt.Println()
-
-		// If the *parent* (batch) context got cancelled mid-item (external
-		// SIGINT), break out — don't start another download.
-		if ctx.Err() != nil {
-			for j := i + 1; j < len(items); j++ {
-				items[j].status = statusAborted
-			}
-			break
+		// Resume prompt for partial downloads.
+		if state.Exists(u) {
+			st, _ := state.PromptResume(u)
+			out[i].resumeState = st
 		}
 	}
-
-	// ── Final summary panel ───────────────────────────────────────────────────
-	printQueuePanel(-1)
-
-	done, failed, aborted := 0, 0, 0
-	for _, it := range items {
-		switch it.status {
-		case statusDone, statusSkipped:
-			done++
-		case statusFailed:
-			failed++
-		case statusAborted:
-			aborted++
-		}
-	}
-	switch {
-	case aborted > 0 && failed == 0:
-		fmt.Println(styleAbort.Render(fmt.Sprintf("  ⊘  aborted — %d/%d completed", done, len(items))))
-	case failed == 0:
-		fmt.Println(styleDone.Render(fmt.Sprintf("  ⬢  all %d transfers complete", len(items))))
-	default:
-		fmt.Println(styleFail.Render(fmt.Sprintf("  ◈  %d/%d failed%s", failed, len(items),
-			func() string {
-				if aborted > 0 {
-					return fmt.Sprintf(", %d aborted", aborted)
-				}
-				return ""
-			}())))
-	}
-	fmt.Println()
-}
-
-// ── Item status tracking (package-level so helpers can reference). ────────────
-
-type itemStatus int
-
-const (
-	statusPending itemStatus = iota
-	statusActive
-	statusDone
-	statusFailed
-	statusSkipped
-	statusAborted
-)
-
-func itemStatusToBatch(s itemStatus) ui.BatchItemStatus {
-	switch s {
-	case statusDone:
-		return ui.BatchItemDone
-	case statusSkipped:
-		return ui.BatchItemSkipped
-	case statusFailed:
-		return ui.BatchItemFailed
-	case statusAborted:
-		return ui.BatchItemAborted
-	}
-	return ui.BatchItemQueued
-}
-
-func truncateSummary(s string, maxLen int) string {
-	if idx := strings.IndexByte(s, '\n'); idx != -1 {
-		s = s[:idx]
-	}
-	s = strings.TrimSpace(s)
-	if len(s) > maxLen {
-		return s[:maxLen-1] + "…"
-	}
-	return s
+	return out
 }

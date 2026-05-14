@@ -6,13 +6,12 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
-	"sync"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
 )
-
 
 var (
 	fgStyleCache     sync.Map // lipgloss.Color → lipgloss.Style
@@ -212,6 +211,19 @@ func (d *dataLink) View(
 	case "DOWNLOADING":
 		statusColor = colorMint
 		pwrOn, cdOn, txOn, rxOn = true, true, true, true
+	case "ASSEMBLING":
+		// Reels spinning — TX/RX swap roles (reading parts → writing
+		// merged output).  Amber accent signals "almost finished".
+		statusColor = colorAmber
+		pwrOn, cdOn, aaOn = true, true, true
+		txOn = d.ticks%3 != 0
+		rxOn = d.ticks%3 != 1
+	case "VERIFYING":
+		// Steady carrier with a slow AA pulse — the link is idle but
+		// the system is still working (checking the signature).
+		statusColor = colorPhosphor
+		pwrOn, cdOn = true, true
+		aaOn = d.ticks%6 < 3
 	case "COMPLETE":
 		statusColor = colorMint
 		pwrOn, cdOn = true, true
