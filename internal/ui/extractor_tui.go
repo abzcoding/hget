@@ -64,6 +64,28 @@ type ExtractorErrorMsg struct{ Err error }
 // ExtractorDoneMsg signals success — auto-quit countdown begins.
 type ExtractorDoneMsg struct{}
 
+// ExtractorFormatsMsg seeds the VCR's browsing-mode selector with the
+// format table parsed from yt-dlp's -J output.  Sent immediately after
+// the metadata message during the probe → select handshake.
+//
+// An empty Video slice means there are no separately-selectable video
+// streams; the model then skips the browser entirely and falls through
+// to yt-dlp's default format spec.
+type ExtractorFormatsMsg struct {
+	Video      []ExtractorFormat
+	Audio      []ExtractorFormat
+	Containers []string
+	IsLive     bool // live streams always skip the selector
+}
+
+// ExtractorSelectionMsg is internal — the model emits it when the user
+// commits a format choice in browsing mode.  The runner forwards the
+// payload to the worker goroutine via a buffered channel.
+type ExtractorSelectionMsg struct {
+	Spec      string
+	Container string
+}
+
 // extractorTickMsg drives animations.
 type extractorTickMsg time.Time
 
@@ -89,8 +111,12 @@ type extractorModel struct {
 	errMsg   string
 	done     bool
 
-	onQuit func()
-	startT time.Time
+	// Browsing state — only meaningful while phase=="selecting".
+	browsing      bool
+	hasSelection  bool // false once we've committed; gates key bindings
+	onQuit        func()
+	onSelection   func(ExtractorSelectionMsg) // wired by RunExtractorTUI
+	startT        time.Time
 }
 
 // NewExtractorModel constructs the extractor-mode TUI model.
@@ -104,11 +130,18 @@ func NewExtractorModel(url string, onQuit func()) extractorModel {
 		spinner: s,
 		vcr:     NewVCR(),
 		mixer:   NewMixer(),
-		phase:   "downloading",
+		phase:   "probing",
 		maxLogs: 5,
 		onQuit:  onQuit,
 		startT:  time.Now(),
 	}
+}
+
+// SetSelectionCallback wires the model's "user pressed REC" handler to
+// the runner's selection channel.  Called by RunExtractorTUI; tests can
+// supply their own to assert against a captured payload.
+func (m *extractorModel) SetSelectionCallback(f func(ExtractorSelectionMsg)) {
+	m.onSelection = f
 }
 
 func (m extractorModel) Init() tea.Cmd {
@@ -128,6 +161,42 @@ func (m extractorModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyMsg:
+		// Browse-mode navigation is only live while we're armed and
+		// waiting for the user.  Once REC is hit (hasSelection=true) we
+		// fall through to the global quit handler so the deck behaves
+		// like a normal recording session again.
+		if m.browsing && !m.hasSelection {
+			switch msg.String() {
+			case "up", "k":
+				m.vcr.CycleVideo(-1)
+				return m, nil
+			case "down", "j":
+				m.vcr.CycleVideo(1)
+				return m, nil
+			case "left", "h":
+				m.vcr.CycleAudio(-1)
+				return m, nil
+			case "right", "l":
+				m.vcr.CycleAudio(1)
+				return m, nil
+			case "tab", "f":
+				m.vcr.CycleContainer(1)
+				return m, nil
+			case "shift+tab":
+				m.vcr.CycleContainer(-1)
+				return m, nil
+			case "enter", "r", "R":
+				spec, cont := m.vcr.Selection()
+				m.hasSelection = true
+				m.browsing = false
+				m.phase = "downloading"
+				m.vcr.SetMode(VCRRecording)
+				if m.onSelection != nil {
+					m.onSelection(ExtractorSelectionMsg{Spec: spec, Container: cont})
+				}
+				return m, nil
+			}
+		}
 		switch msg.String() {
 		case "q", "Q", "ctrl+c":
 			if m.stopping {
@@ -171,7 +240,24 @@ func (m extractorModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		})
 		return m, nil
 
+	case ExtractorFormatsMsg:
+		// Live streams and selector-less sources skip browsing entirely.
+		if msg.IsLive || (len(msg.Video) == 0 && len(msg.Audio) == 0) {
+			return m, nil
+		}
+		m.vcr.SetFormats(msg.Video, msg.Audio, msg.Containers)
+		m.browsing = true
+		m.hasSelection = false
+		m.phase = "selecting"
+		m.vcr.SetMode(VCRBrowsing)
+		return m, nil
+
 	case ExtractorPhaseMsg:
+		// Suppress an early "downloading" message while we're still
+		// browsing — the user committing REC owns that transition.
+		if m.browsing && !m.hasSelection && msg.Phase == "downloading" {
+			return m, nil
+		}
 		m.phase = msg.Phase
 		switch msg.Phase {
 		case "downloading":
@@ -295,6 +381,13 @@ func (m extractorModel) View() string {
 	case m.hasError:
 		b.WriteString("  " + styleError.Render("✗ ") +
 			styleErrBox.Render(truncate(m.errMsg, w-10)))
+	case m.browsing && !m.hasSelection:
+		b.WriteString("  " +
+			styleKeyCap.Render("▲▼") + styleHelp.Render(" tape   ") +
+			styleKeyCap.Render("◀▶") + styleHelp.Render(" audio   ") +
+			styleKeyCap.Render("⇥") + styleHelp.Render(" format   ") +
+			styleKeyCap.Render("↵") + styleHelp.Render(" rec   ") +
+			styleKeyCap.Render("q") + styleHelp.Render(" abort"))
 	default:
 		b.WriteString("  " + styleHelp.Render("press ") +
 			styleKeyCap.Render("q") +
@@ -326,6 +419,13 @@ func centreBlock(block string, termW int) string {
 
 // ── Run loop ─────────────────────────────────────────────────────────────────
 
+// ExtractorSelector blocks until the user commits a format selection
+// from the VCR's browsing mode, or until ctx is cancelled.  Returns the
+// yt-dlp spec + container chosen.  Empty strings mean "use the default
+// pipeline" — happens when the source has no selectable formats or the
+// user dismissed without picking.
+type ExtractorSelector func(ctx context.Context) (spec, container string, err error)
+
 // ExtractorRunOptions configures RunExtractorTUI.
 type ExtractorRunOptions struct {
 	Ctx    context.Context
@@ -338,17 +438,43 @@ type ExtractorRunOptions struct {
 // Extractor* messages via the package-level Program handle.  Mirrors the
 // shape of RunWithTUI: when stdout isn't a TTY, the worker runs directly
 // and TUI sends are no-ops (the package-level Program is nil).
-func RunExtractorTUI(opts ExtractorRunOptions, worker func() error) error {
+//
+// `worker` is invoked with an ExtractorSelector that blocks until the
+// user commits a format choice in the VCR's browsing mode.  Workers
+// that bypass the selector (live streams, no format table) simply
+// don't call it.  In the non-TTY fallback path the selector returns
+// immediately with empty strings ("use defaults").
+func RunExtractorTUI(opts ExtractorRunOptions, worker func(ExtractorSelector) error) error {
 	if !(isatty.IsTerminal(os.Stdout.Fd()) && DisplayProgress) {
 		// Non-TTY fallback — run the worker directly, log progress
 		// through charmbracelet/log via ui.Printf().  Program stays nil
-		// so the extractor sink drops UI events.
-		return worker()
+		// so the extractor sink drops UI events.  The selector returns
+		// the zero value so yt-dlp's bv*+ba/b default kicks in.
+		return worker(func(ctx context.Context) (string, string, error) {
+			return "", "", nil
+		})
 	}
 
+	selectionCh := make(chan ExtractorSelectionMsg, 1)
 	model := NewExtractorModel(opts.URL, opts.OnQuit)
+	model.SetSelectionCallback(func(s ExtractorSelectionMsg) {
+		// Buffered + drop-if-full: a re-press of REC is a no-op.
+		select {
+		case selectionCh <- s:
+		default:
+		}
+	})
 	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithoutSignalHandler())
 	Program = p
+
+	selector := func(ctx context.Context) (string, string, error) {
+		select {
+		case s := <-selectionCh:
+			return s.Spec, s.Container, nil
+		case <-ctx.Done():
+			return "", "", ctx.Err()
+		}
+	}
 
 	// External-cancel watchdog.  Mirrors RunWithTUI so SIGINT propagates
 	// uniformly across both pipelines.
@@ -382,7 +508,7 @@ func RunExtractorTUI(opts ExtractorRunOptions, worker func() error) error {
 				p.Send(ExtractorPhaseMsg{Phase: "done"})
 			}
 		}()
-		workerErr = worker()
+		workerErr = worker(selector)
 	}()
 
 	if _, err := p.Run(); err != nil {

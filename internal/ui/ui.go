@@ -2359,6 +2359,36 @@ const helpMarkdown = "" +
 	"| `--cookies <path>`  | cookies.txt for the extractor (yt-dlp `--cookies`)     |             |\n" +
 	"| `--cookies-from-browser <s>` | extract cookies from browser (e.g. `firefox`, `chrome:Default`) | |\n" +
 	"\n" +
+	"## Extractor mode (yt-dlp pipeline)\n" +
+	"\n" +
+	"When the URL points at a media host (YouTube, Vimeo, Twitch, …) hget hands\n" +
+	"off to `yt-dlp` and renders a retro VCR panel instead of the data-link.\n" +
+	"After probing, the deck enters **browsing mode** — the READY LED lights\n" +
+	"amber and three rocker switches replace the live readouts so you can pick\n" +
+	"the tape before the heads come down. No popups, no jumpscreens: the same\n" +
+	"chassis re-displays.\n" +
+	"\n" +
+	"Press REC (`enter` / `r`) to engage; the VCR slides straight into the\n" +
+	"recording animation. The Mixer console fades in below once yt-dlp moves\n" +
+	"into the ffmpeg muxing phase.\n" +
+	"\n" +
+	"### Browsing-mode keys\n" +
+	"\n" +
+	"| Key                  | Rocker                                          |\n" +
+	"| -------------------- | ----------------------------------------------- |\n" +
+	"| `↑` / `k`            | tape (video) — cycle to higher quality          |\n" +
+	"| `↓` / `j`            | tape (video) — cycle to lower quality           |\n" +
+	"| `←` / `h`            | audio track — previous                          |\n" +
+	"| `→` / `l`            | audio track — next                              |\n" +
+	"| `tab` / `f`          | container — `mp4` / `mkv` / `webm`              |\n" +
+	"| `shift+tab`          | container — reverse                             |\n" +
+	"| `enter` / `r`        | **REC** — commit selection and start download   |\n" +
+	"| `q` / `ctrl+c`       | abort and exit                                  |\n" +
+	"\n" +
+	"Progressive streams (Twitter, etc.) collapse the audio rocker into\n" +
+	"`(included)`. Live streams skip the selector entirely and engage\n" +
+	"yt-dlp's `best` format on sight.\n" +
+	"\n" +
 	"## Examples\n" +
 	"\n" +
 	"```bash\n" +

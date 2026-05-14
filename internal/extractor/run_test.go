@@ -74,7 +74,7 @@ func TestRun_StreamsProgressAndPhasesViaSink(t *testing.T) {
 	t.Setenv("PATH", tmp)
 
 	sink := &fakeSink{}
-	out, err := Run(context.Background(), "https://example.com/x", "", Options{}, sink)
+	out, err := Run(context.Background(), "https://example.com/x", "", Options{}, FormatSelection{}, sink)
 	if err != nil {
 		t.Fatalf("Run returned error: %v", err)
 	}
@@ -146,7 +146,7 @@ exit 0
 	t.Setenv("PATH", tmp)
 
 	sink := &fakeSink{}
-	if _, err := Run(context.Background(), "https://x.com/y", "", Options{}, sink); err != nil {
+	if _, err := Run(context.Background(), "https://x.com/y", "", Options{}, FormatSelection{}, sink); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	gotWarn := false

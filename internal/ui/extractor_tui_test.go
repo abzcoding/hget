@@ -172,6 +172,132 @@ func TestExtractorModel_OutputPathSurfaced(t *testing.T) {
 	mustContain(t, view, "Resolved Output Path.mp4", "resolved output path missing")
 }
 
+func TestExtractorModel_BrowsingRockersAndREC(t *testing.T) {
+	var committed ExtractorSelectionMsg
+	captured := false
+	m := NewExtractorModel("https://vimeo.com/76979871", func() {})
+	m.SetSelectionCallback(func(s ExtractorSelectionMsg) {
+		committed = s
+		captured = true
+	})
+	m.width = 100
+	m.height = 60
+
+	// Seed metadata + a two-tier format table (video-only + audio-only).
+	m = step(t, m,
+		ExtractorMetaMsg{
+			Title:    "Sample Video",
+			Channel:  "Sample Channel",
+			Duration: time.Minute,
+			HasAudio: true,
+		},
+		ExtractorFormatsMsg{
+			Video: []ExtractorFormat{
+				{ID: "315", Resolution: "3840x2160", Height: 2160, FPS: 60, VCodec: "vp9", Ext: "webm", Filesize: 200_000_000, Note: "2160p60", HasVideo: true},
+				{ID: "299", Resolution: "1920x1080", Height: 1080, FPS: 60, VCodec: "avc1", Ext: "mp4", Filesize: 80_000_000, Note: "1080p60", HasVideo: true},
+				{ID: "136", Resolution: "1280x720", Height: 720, FPS: 30, VCodec: "avc1", Ext: "mp4", Filesize: 40_000_000, Note: "720p", HasVideo: true},
+			},
+			Audio: []ExtractorFormat{
+				{ID: "251", ACodec: "opus", Ext: "webm", ABR: 160, Filesize: 6_000_000, HasAudio: true},
+				{ID: "140", ACodec: "mp4a", Ext: "m4a", ABR: 128, Filesize: 5_000_000, HasAudio: true},
+			},
+			Containers: []string{"mp4", "mkv", "webm"},
+		},
+	)
+	m = tickN(t, m, 3)
+
+	// The VCR must be in browsing mode showing rocker rows + READY LED.
+	view := m.View()
+	mustContain(t, view, "READY", "READY LED missing in browsing mode")
+	mustContain(t, view, "◀", "left rocker arrow missing")
+	mustContain(t, view, "▶", "right rocker arrow missing")
+	mustContain(t, view, "2160p60", "highest video preset not shown by default")
+	mustContain(t, view, "opus", "default audio not shown")
+	mustContain(t, view, "MP4", "default container not shown")
+	mustContain(t, view, "ARM", "ARMED progress label missing")
+	mustContain(t, view, "▲▼", "browse footer help missing tape rocker hint")
+
+	// Cycle video down once → expect 1080p60 selected.
+	m = step(t, m, tea.KeyMsg{Type: tea.KeyDown})
+	m = tickN(t, m, 2)
+	view = m.View()
+	mustContain(t, view, "1080p60", "video down-rocker didn't advance")
+
+	// Cycle audio right once → mp4a.
+	m = step(t, m, tea.KeyMsg{Type: tea.KeyRight})
+	m = tickN(t, m, 2)
+	view = m.View()
+	mustContain(t, view, "mp4a", "audio rocker didn't advance")
+
+	// Cycle container (tab) → mkv.
+	m = step(t, m, tea.KeyMsg{Type: tea.KeyTab})
+	m = tickN(t, m, 2)
+	view = m.View()
+	mustContain(t, view, "MKV", "container rocker didn't advance")
+
+	// Commit with ENTER → callback fires with the expected spec.
+	m = step(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	if !captured {
+		t.Fatalf("selection callback never fired")
+	}
+	if committed.Spec != "299+140" {
+		t.Errorf("committed spec = %q, want %q", committed.Spec, "299+140")
+	}
+	if committed.Container != "mkv" {
+		t.Errorf("committed container = %q, want mkv", committed.Container)
+	}
+
+	// After REC the panel transitions out of browsing — no more ARMED.
+	m = tickN(t, m, 3)
+	view = m.View()
+	if strings.Contains(stripANSI(view), "◐ ARM") {
+		t.Errorf("ARMED label still showing after commit")
+	}
+	mustContain(t, view, "● REC", "REC label didn't engage after commit")
+}
+
+func TestExtractorModel_LiveStreamSkipsSelector(t *testing.T) {
+	captured := false
+	m := NewExtractorModel("https://twitch.tv/x", func() {})
+	m.SetSelectionCallback(func(ExtractorSelectionMsg) { captured = true })
+	m.width = 100
+	m.height = 60
+
+	m = step(t, m,
+		ExtractorMetaMsg{Title: "Live Show"},
+		ExtractorFormatsMsg{
+			Video:  []ExtractorFormat{{ID: "best", Note: "live", HasVideo: true}},
+			IsLive: true,
+		},
+	)
+	m = tickN(t, m, 3)
+	view := stripANSI(m.View())
+	if strings.Contains(view, "◐ ARM") {
+		t.Errorf("live stream entered browsing mode")
+	}
+	if captured {
+		t.Errorf("selection callback fired for live stream")
+	}
+}
+
+func TestExtractorModel_ProgressiveOnlyCollapsesAudioRocker(t *testing.T) {
+	m := NewExtractorModel("https://twitter.com/x", func() {})
+	m.width = 100
+	m.height = 60
+	m = step(t, m,
+		ExtractorMetaMsg{Title: "Tweet"},
+		ExtractorFormatsMsg{
+			Video: []ExtractorFormat{
+				{ID: "22", Resolution: "1280x720", Height: 720, FPS: 30, VCodec: "avc1", ACodec: "mp4a", Ext: "mp4", HasVideo: true, HasAudio: true},
+			},
+			Containers: []string{"mp4"},
+		},
+	)
+	m = tickN(t, m, 3)
+	view := stripANSI(m.View())
+	mustContain(t, view, "included", "audio rocker should collapse for progressive-only sources")
+}
+
 func TestExtractorModel_ErrorRenders(t *testing.T) {
 	m := NewExtractorModel("https://vimeo.com/x", func() {})
 	m.width = 100

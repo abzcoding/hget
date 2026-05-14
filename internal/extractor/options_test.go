@@ -72,6 +72,7 @@ exit 0
 	sink := &fakeSink{}
 	_, err := Run(context.Background(), "https://example.com/x", "",
 		Options{CookiesFile: "/tmp/c.txt", CookiesFromBrowser: "firefox"},
+		FormatSelection{},
 		sink)
 	if err != nil {
 		t.Fatalf("Run: %v", err)

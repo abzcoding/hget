@@ -22,6 +22,7 @@ type VCRMode int
 
 const (
 	VCRStandby   VCRMode = iota // pre-recording, "tape inserted" state
+	VCRBrowsing                 // probe complete; user is picking a tape
 	VCRRecording                // [download] phase active
 	VCREjecting                 // post-record cooldown (between phases)
 	VCRError
@@ -76,6 +77,131 @@ type VCRAnimation struct {
 	// from progress (you still see motion when buffering / paused).
 	tapeOffset int
 	tapeStartT time.Time
+
+	// Browsing-mode state — populated when the extractor pipeline sends
+	// the format table.  All indices are clamped on every accessor so a
+	// stale index never reads past the slice.
+	videoFormats []ExtractorFormat
+	audioFormats []ExtractorFormat
+	containers   []string
+	videoIdx     int
+	audioIdx     int
+	containerIdx int
+}
+
+// SetFormats seeds the browsing-mode selector with the format table
+// emitted by the extractor.  Defaults are highest-quality video, first
+// audio track, mp4 container — matching yt-dlp's bv*+ba/b heuristic so
+// "just hit enter" produces the pre-selector behaviour.
+func (v *VCRAnimation) SetFormats(video, audio []ExtractorFormat, containers []string) {
+	v.videoFormats = video
+	v.audioFormats = audio
+	v.containers = containers
+	v.videoIdx = 0
+	v.audioIdx = 0
+	v.containerIdx = 0
+	if len(v.containers) == 0 {
+		v.containers = []string{"mp4"}
+	}
+}
+
+// HasFormats reports whether the browsing UI has anything to show.
+func (v VCRAnimation) HasFormats() bool { return len(v.videoFormats) > 0 || len(v.audioFormats) > 0 }
+
+// CycleVideo / CycleAudio / CycleContainer advance (or rewind, with a
+// negative step) the corresponding selector by one.  Indices wrap so
+// the rocker switch reads as endless rather than bouncing off endstops.
+func (v *VCRAnimation) CycleVideo(step int)     { v.videoIdx = cycleIdx(v.videoIdx, step, len(v.videoFormats)) }
+func (v *VCRAnimation) CycleAudio(step int)     { v.audioIdx = cycleIdx(v.audioIdx, step, len(v.audioFormats)) }
+func (v *VCRAnimation) CycleContainer(step int) { v.containerIdx = cycleIdx(v.containerIdx, step, len(v.containers)) }
+
+func cycleIdx(cur, step, n int) int {
+	if n <= 0 {
+		return 0
+	}
+	r := (cur + step) % n
+	if r < 0 {
+		r += n
+	}
+	return r
+}
+
+// CurrentVideo / CurrentAudio / CurrentContainer return the selected
+// rocker positions.  Returned booleans are false when the relevant list
+// is empty (e.g. audio-only sources have no separate audio track).
+func (v VCRAnimation) CurrentVideo() (ExtractorFormat, bool) {
+	if len(v.videoFormats) == 0 {
+		return ExtractorFormat{}, false
+	}
+	return v.videoFormats[clampIdx(v.videoIdx, len(v.videoFormats))], true
+}
+func (v VCRAnimation) CurrentAudio() (ExtractorFormat, bool) {
+	if len(v.audioFormats) == 0 {
+		return ExtractorFormat{}, false
+	}
+	return v.audioFormats[clampIdx(v.audioIdx, len(v.audioFormats))], true
+}
+func (v VCRAnimation) CurrentContainer() string {
+	if len(v.containers) == 0 {
+		return "mp4"
+	}
+	return v.containers[clampIdx(v.containerIdx, len(v.containers))]
+}
+
+// Selection builds the yt-dlp format spec from the current rocker
+// positions.  When the chosen video format is progressive (carries its
+// own audio), the audio selector is ignored.
+func (v VCRAnimation) Selection() (spec, container string) {
+	container = v.CurrentContainer()
+	vf, hasV := v.CurrentVideo()
+	if !hasV {
+		// No video formats at all (audio-only source) — fall back to
+		// just the audio pick.
+		if af, ok := v.CurrentAudio(); ok {
+			return af.ID, container
+		}
+		return "", container
+	}
+	if vf.HasAudio || !hasAudioPick(v) {
+		// Progressive format, or no audio track to merge in.
+		return vf.ID, container
+	}
+	af, _ := v.CurrentAudio()
+	return vf.ID + "+" + af.ID, container
+}
+
+func hasAudioPick(v VCRAnimation) bool { return len(v.audioFormats) > 0 }
+
+func clampIdx(i, n int) int {
+	if n <= 0 {
+		return 0
+	}
+	if i < 0 {
+		return 0
+	}
+	if i >= n {
+		return n - 1
+	}
+	return i
+}
+
+// ExtractorFormat mirrors extractor.Format inside the ui package so the
+// renderer doesn't pull a dependency cycle.  Populated via the
+// ExtractorFormatsMsg pipeline.
+type ExtractorFormat struct {
+	ID         string
+	Ext        string
+	Resolution string
+	Height     int
+	FPS        float64
+	VCodec     string
+	ACodec     string
+	TBR        float64
+	ABR        float64
+	Filesize   int64
+	Note       string
+	HasVideo   bool
+	HasAudio   bool
 }
 
 // NewVCR builds a fresh, idle VCR animation.
@@ -128,7 +254,7 @@ func (v *VCRAnimation) Tick() {
 		v.pctSm = 1
 	}
 	// Tape head scrolls at a fixed rate while recording, slower during
-	// standby / eject.  Mod the offset to keep the int small.
+	// standby / browsing / eject.  Mod the offset to keep the int small.
 	step := 1
 	if v.mode != VCRRecording {
 		step = 0
@@ -136,7 +262,7 @@ func (v *VCRAnimation) Tick() {
 			step = 1
 		}
 	}
-	v.tapeOffset = (v.tapeOffset + step) % 1024
+	v.tapeOffset = (v.tapeOffset + step) % 4096
 }
 
 // View renders the entire VCR panel as a single string.
@@ -189,6 +315,10 @@ func (v VCRAnimation) View() string {
 	tape := v.mode == VCRRecording
 	stereo := v.meta.HasAudio
 	hifi := v.meta.HasAudio && v.mode == VCRRecording && (v.frame/12)%2 == 0
+	// READY LED — solid amber in browsing mode, off otherwise.  This is
+	// what visually signals "deck is armed, waiting for you to press
+	// REC" without taking a row of text.
+	ready := v.mode == VCRBrowsing && (v.frame/16)%2 == 0
 	chip := func(name string, on bool, col lipgloss.Color) string {
 		c := Theme.Slate
 		if on {
@@ -199,6 +329,7 @@ func (v VCRAnimation) View() string {
 	chips := strings.Join([]string{
 		chip("PWR", pwr, Theme.Mint),
 		chip("REC", rec, Theme.Magenta),
+		chip("READY", ready, Theme.Amber),
 		chip("TAPE", tape, Theme.Phosphor),
 		chip("STEREO", stereo, Theme.Amber),
 		chip("HI-FI", hifi, Theme.Phosphor),
@@ -241,8 +372,15 @@ func (v VCRAnimation) View() string {
 
 	// ── Progress bar + percent. ─────────────────────────────────────────
 	bar := v.bar.ViewAs(v.pctSm)
-	pctTxt := fmt.Sprintf("%5.1f%%", v.pctSm*100)
-	progRow := mag.Render("● REC") + "  " + bar + "  " + frost.Render(pctTxt)
+	recLabel := mag.Render("● REC")
+	pctRendered := frost.Render(fmt.Sprintf("%5.1f%%", v.pctSm*100))
+	if v.mode == VCRBrowsing {
+		// Dim the REC label and show "ARMED" — the deck is loaded but
+		// hasn't latched the heads down yet.
+		recLabel = fgBoldStyle(Theme.Amber).Render("◐ ARM")
+		pctRendered = fgStyle(Theme.Steel).Render("ready")
+	}
+	progRow := recLabel + "  " + bar + "  " + pctRendered
 	b.WriteString(chrome.Render("║ ") + pad(progRow, inner-2) + chrome.Render(" ║") + "\n")
 
 	// ── Audio VU meters (peak-style bars driven by speed). ──────────────
@@ -265,9 +403,18 @@ func (v VCRAnimation) View() string {
 	}
 	rowFor("title", v.meta.Title, Theme.Frost)
 	rowFor("channel", v.meta.Channel, Theme.Amber)
-	rowFor("video", v.videoLine(), Theme.Phosphor)
-	rowFor("audio", v.audioLine(), Theme.Phosphor)
-	rowFor("rate", v.rateLine(), Theme.Mint)
+	if v.mode == VCRBrowsing {
+		// While browsing: replace the video/audio/rate readouts with
+		// three rocker switches the user manipulates in place.  Stable
+		// row count keeps the chassis from shifting.
+		b.WriteString(chrome.Render("║ ") + pad(v.renderRockerRow("video", v.videoRocker(inner-18)), inner-2) + chrome.Render(" ║") + "\n")
+		b.WriteString(chrome.Render("║ ") + pad(v.renderRockerRow("audio", v.audioRocker(inner-18)), inner-2) + chrome.Render(" ║") + "\n")
+		b.WriteString(chrome.Render("║ ") + pad(v.renderRockerRow("format", v.containerRocker(inner-18)), inner-2) + chrome.Render(" ║") + "\n")
+	} else {
+		rowFor("video", v.videoLine(), Theme.Phosphor)
+		rowFor("audio", v.audioLine(), Theme.Phosphor)
+		rowFor("rate", v.rateLine(), Theme.Mint)
+	}
 
 	// ── Bottom rivet plate. ─────────────────────────────────────────────
 	rivetCount := (inner - 2) / 2
@@ -290,20 +437,33 @@ func (v VCRAnimation) View() string {
 // detail that sells the illusion.
 func (v VCRAnimation) reelGlyph(left bool) string {
 	frames := []string{"◜◠◝", "◝◠◞", "◞◡◟", "◟◡◜"}
-	if v.mode != VCRRecording {
+	switch v.mode {
+	case VCRRecording:
+		idx := (v.frame / 4) % 4
+		if !left {
+			idx = (v.frame / 3) % 4 // take-up spins ~1.3× faster
+		}
+		return frames[idx]
+	case VCRBrowsing:
+		// Slow idle-wobble — half-speed, no left/right phase offset.
+		// Sells "spinning up" without implying recording.
+		return frames[(v.frame/14)%4]
+	default:
 		return "◯◯◯"
 	}
-	idx := (v.frame / 4) % 4
-	if !left {
-		idx = (v.frame / 3) % 4 // take-up spins ~1.3× faster
-	}
-	return frames[idx]
 }
 
 // renderTapeStrip draws the magnetic tape itself — a row of glyphs that
 // scrolls horizontally.  Filled portion (left of the head) uses dense
 // data glyphs; the tail uses spare ones to suggest unrecorded tape.
+//
+// In browsing mode the strip becomes a slow-shimmer "READY" caption
+// flanked by a static texture — the deck is loaded but the heads aren't
+// down yet.  Keeps the panel alive without implying progress.
 func (v VCRAnimation) renderTapeStrip(width int) string {
+	if v.mode == VCRBrowsing {
+		return v.renderReadyStrip(width)
+	}
 	headPos := int(v.pctSm * float64(width))
 	if headPos > width {
 		headPos = width
@@ -323,6 +483,147 @@ func (v VCRAnimation) renderTapeStrip(width int) string {
 	recorded := fgStyle(Theme.Magenta).Render(string(out[:headPos]))
 	upcoming := fgStyle(Theme.Slate).Render(string(out[headPos:]))
 	return recorded + upcoming
+}
+
+// renderReadyStrip — browsing-mode tape: gentle horizontal static with
+// "READY" stamped in the centre that fades in and out with the frame
+// counter.  No progress, no motion bias.
+func (v VCRAnimation) renderReadyStrip(width int) string {
+	bg := make([]rune, width)
+	shades := []rune("·░·░")
+	for i := 0; i < width; i++ {
+		bg[i] = shades[(i+v.tapeOffset/2)%len(shades)]
+	}
+	label := " READY "
+	pos := (width - len(label)) / 2
+	if pos < 0 {
+		pos = 0
+	}
+	for i, r := range label {
+		if pos+i < width {
+			bg[pos+i] = r
+		}
+	}
+	pulse := (v.frame / 24) % 2
+	labelCol := Theme.Amber
+	if pulse == 0 {
+		labelCol = Theme.Steel
+	}
+	pre := fgStyle(Theme.Slate).Render(string(bg[:pos]))
+	mid := fgBoldStyle(labelCol).Render(string(bg[pos : pos+len(label)]))
+	post := fgStyle(Theme.Slate).Render(string(bg[pos+len(label):]))
+	return pre + mid + post
+}
+
+// renderRockerRow formats one labelled rocker-switch row, matching the
+// gutters used by the regular detail-row renderer so the chassis stays
+// pixel-stable between browsing and recording.
+func (v VCRAnimation) renderRockerRow(label, value string) string {
+	steel := fgStyle(Theme.Steel)
+	return "  " + steel.Render(rightPad(label, 12)) + value
+}
+
+// videoRocker / audioRocker / containerRocker render the three browse
+// rockers — left arrow, current selection, right arrow, position chip.
+// The arrows pulse subtly while browsing so the affordance reads as
+// interactive.  Width is the budget for the value column.
+func (v VCRAnimation) videoRocker(width int) string {
+	if len(v.videoFormats) == 0 {
+		return fgStyle(Theme.Slate).Render("(no video streams)")
+	}
+	cur, _ := v.CurrentVideo()
+	val := formatVideoLine(cur)
+	return v.renderRocker(val, v.videoIdx, len(v.videoFormats), width)
+}
+
+func (v VCRAnimation) audioRocker(width int) string {
+	if !hasAudioPick(v) {
+		// Source is progressive-only; the audio rocker collapses into
+		// a static "included" caption.
+		return fgStyle(Theme.Slate).Render("(included in video stream)")
+	}
+	if vf, ok := v.CurrentVideo(); ok && vf.HasAudio {
+		return fgStyle(Theme.Slate).Render("(progressive — audio bundled)")
+	}
+	cur, _ := v.CurrentAudio()
+	val := formatAudioLine(cur)
+	return v.renderRocker(val, v.audioIdx, len(v.audioFormats), width)
+}
+
+func (v VCRAnimation) containerRocker(width int) string {
+	val := v.CurrentContainer()
+	return v.renderRocker(strings.ToUpper(val), v.containerIdx, len(v.containers), width)
+}
+
+// renderRocker draws "◀ value ▶  (i/n)" with pulsing arrows.
+func (v VCRAnimation) renderRocker(value string, idx, n, width int) string {
+	pulse := (v.frame / 10) % 3
+	arrowCol := Theme.Magenta
+	if pulse == 0 {
+		arrowCol = Theme.Slate
+	}
+	left := fgBoldStyle(arrowCol).Render("◀")
+	right := fgBoldStyle(arrowCol).Render("▶")
+	pos := fgStyle(Theme.Slate).Render(fmt.Sprintf(" (%d/%d)", idx+1, n))
+	valStyled := fgBoldStyle(Theme.Frost).Render(truncate(value, width-12))
+	return left + " " + valStyled + " " + right + pos
+}
+
+// formatVideoLine / formatAudioLine — compact one-line summaries shown
+// on the rocker plate.  We trade exhaustive detail for stable width.
+func formatVideoLine(f ExtractorFormat) string {
+	parts := []string{}
+	switch {
+	case f.Note != "":
+		parts = append(parts, f.Note)
+	case f.Height > 0 && f.FPS > 0:
+		parts = append(parts, fmt.Sprintf("%dp%.0f", f.Height, f.FPS))
+	case f.Height > 0:
+		parts = append(parts, fmt.Sprintf("%dp", f.Height))
+	case f.Resolution != "":
+		parts = append(parts, f.Resolution)
+	}
+	if f.VCodec != "" && f.VCodec != "none" {
+		parts = append(parts, shortCodec(f.VCodec))
+	}
+	if f.HasAudio {
+		parts = append(parts, "+a")
+	}
+	if f.Filesize > 0 {
+		parts = append(parts, "~"+formatBytes(f.Filesize))
+	}
+	if f.Ext != "" {
+		parts = append(parts, f.Ext)
+	}
+	return strings.Join(parts, " · ")
+}
+
+func formatAudioLine(f ExtractorFormat) string {
+	parts := []string{}
+	if f.ACodec != "" && f.ACodec != "none" {
+		parts = append(parts, shortCodec(f.ACodec))
+	}
+	if f.ABR > 0 {
+		parts = append(parts, fmt.Sprintf("%.0fk", f.ABR))
+	} else if f.TBR > 0 {
+		parts = append(parts, fmt.Sprintf("%.0fk", f.TBR))
+	}
+	if f.Filesize > 0 {
+		parts = append(parts, "~"+formatBytes(f.Filesize))
+	}
+	if f.Ext != "" {
+		parts = append(parts, f.Ext)
+	}
+	return strings.Join(parts, " · ")
+}
+
+// shortCodec trims yt-dlp's verbose codec strings ("avc1.42001f") down
+// to a marketing-friendly form ("avc1") for the narrow rocker plate.
+func shortCodec(c string) string {
+	if i := strings.IndexAny(c, "."); i > 0 {
+		return c[:i]
+	}
+	return c
 }
 
 // renderCounter renders the classic four-digit VCR counter — but driven

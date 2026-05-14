@@ -225,8 +225,18 @@ func runExtractor(rootCtx context.Context, url string, opts extractor.Options) {
 		Ctx:    itemCtx,
 		URL:    url,
 		OnQuit: func() { cancelItem(downloader.ErrUserQuit) },
-	}, func() error {
-		return extractor.Pipeline(itemCtx, url, "", opts)
+	}, func(sel ui.ExtractorSelector) error {
+		// The selector function bridges the TUI's "user pressed REC"
+		// event into extractor.Pipeline's SelectorFunc contract.
+		// Empty spec/container ("use defaults") flow through unchanged.
+		picker := func(ctx context.Context, _ extractor.Meta) (extractor.FormatSelection, error) {
+			spec, container, err := sel(ctx)
+			if err != nil {
+				return extractor.FormatSelection{}, err
+			}
+			return extractor.FormatSelection{Spec: spec, Container: container}, nil
+		}
+		return extractor.Pipeline(itemCtx, url, "", opts, picker)
 	})
 
 	if err != nil &&

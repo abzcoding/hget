@@ -91,7 +91,55 @@ type Meta struct {
 	VCodec      string
 	ACodec      string
 	Filesize    int64 // best-effort estimate from -J ("filesize" or "filesize_approx")
+	IsLive      bool  // true for live streams — skips the format selector
+
+	// Formats is the full, cleaned format table extracted from yt-dlp's
+	// -J output.  Empty when -J didn't populate the formats[] array
+	// (some single-stream sources).  Renderers should treat an empty
+	// list as "fall back to default spec".
+	Formats []Format
 }
+
+// FormatSelection is the user's choice (or programmatic default) for
+// which streams yt-dlp should download and how to package them.
+//
+// The zero value is valid and means "yt-dlp's default best-video+audio
+// pick into mp4" — keeping callers that don't care about selection
+// (non-TTY, --format flag absent) one line shorter.
+type FormatSelection struct {
+	// Spec is forwarded as the value of `-f`.  Examples:
+	//
+	//   "bv*+ba/b"     // default — best video + best audio, single fallback
+	//   "248+251"      // explicit pair (separate streams, will mux)
+	//   "22"           // single progressive format (no mux needed)
+	//   "bv[height<=720]+ba"
+	Spec string
+
+	// Container is forwarded as the value of `--merge-output-format`.
+	// Ignored when Spec resolves to a single progressive format
+	// (yt-dlp skips the merger in that path).
+	Container string
+}
+
+// Args renders the selection as yt-dlp CLI fragments, applying defaults
+// for empty fields.  Always returns a non-empty slice.
+func (s FormatSelection) Args() []string {
+	spec := s.Spec
+	if spec == "" {
+		spec = "bv*+ba/b"
+	}
+	cont := s.Container
+	if cont == "" {
+		cont = "mp4"
+	}
+	return []string{"-f", spec, "--merge-output-format", cont}
+}
+
+// SelectorFunc is invoked between Probe and Run.  It receives the
+// resolved metadata (with Formats populated) and returns the user's
+// choice.  A nil SelectorFunc means "use FormatSelection{}".  Returning
+// a non-nil error aborts the pipeline before yt-dlp is spawned.
+type SelectorFunc func(ctx context.Context, meta Meta) (FormatSelection, error)
 
 // DownloadProgress is the parsed state of one yt-dlp [download] line.
 type DownloadProgress struct {
@@ -146,7 +194,11 @@ const progressTemplate = "download:HGET|%(progress._percent_str)s|%(progress.dow
 // Run streams a download via yt-dlp.  Events flow through sink.  The
 // child process is killed when ctx is cancelled (CommandContext does the
 // SIGKILL).  Returns the chosen output path on success.
-func Run(ctx context.Context, url, outDir string, opts Options, sink MetaSink) (string, error) {
+//
+// `sel` controls which format spec / container yt-dlp receives.  The
+// zero value falls back to "best video + audio merged to mp4" — the
+// pre-selector behaviour, preserved for non-TTY callers.
+func Run(ctx context.Context, url, outDir string, opts Options, sel FormatSelection, sink MetaSink) (string, error) {
 	if _, err := exec.LookPath("yt-dlp"); err != nil {
 		return "", ErrNotInstalled
 	}
@@ -160,10 +212,9 @@ func Run(ctx context.Context, url, outDir string, opts Options, sink MetaSink) (
 		"--no-playlist",
 		"--newline", // emit one progress line per update
 		"--progress-template", progressTemplate,
-		"-f", "bv*+ba/b", // best video+audio, fall back to single
-		"--merge-output-format", "mp4",
-		"-o", "%(title)s.%(ext)s",
 	}
+	args = append(args, sel.Args()...)
+	args = append(args, "-o", "%(title)s.%(ext)s")
 	args = append(args, opts.authArgs()...)
 	args = append(args, url)
 	if outDir != "" {

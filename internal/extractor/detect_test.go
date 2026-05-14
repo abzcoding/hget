@@ -89,3 +89,59 @@ func TestMetaSafeFilename(t *testing.T) {
 		t.Errorf("SafeFilename=%q want %q", got, want)
 	}
 }
+
+func TestFormatSelection_ArgsDefaults(t *testing.T) {
+	got := (FormatSelection{}).Args()
+	want := []string{"-f", "bv*+ba/b", "--merge-output-format", "mp4"}
+	if len(got) != len(want) {
+		t.Fatalf("default args length: got %v want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("default args[%d]=%q want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestFormatSelection_ArgsExplicit(t *testing.T) {
+	got := FormatSelection{Spec: "299+140", Container: "mkv"}.Args()
+	if got[1] != "299+140" || got[3] != "mkv" {
+		t.Errorf("explicit args=%v", got)
+	}
+}
+
+func TestParseMetaJSON_ExtractsFormats(t *testing.T) {
+	doc := []byte(`{
+        "title": "Sample",
+        "ext": "mp4",
+        "duration": 120,
+        "formats": [
+            {"format_id": "sb0", "ext": "mhtml", "vcodec": "none", "acodec": "none", "protocol": "mhtml"},
+            {"format_id": "140", "ext": "m4a", "vcodec": "none", "acodec": "mp4a.40.2", "abr": 128, "filesize": 5000000},
+            {"format_id": "299", "ext": "mp4", "vcodec": "avc1.640028", "acodec": "none", "width": 1920, "height": 1080, "fps": 60, "tbr": 6000, "filesize": 80000000, "format_note": "1080p60"},
+            {"format_id": "22",  "ext": "mp4", "vcodec": "avc1.64001F", "acodec": "mp4a.40.2", "width": 1280, "height": 720, "fps": 30}
+        ]
+    }`)
+	m, err := parseMetaJSON(doc)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(m.Formats) != 3 {
+		t.Fatalf("expected 3 cleaned formats (mhtml dropped), got %d: %+v", len(m.Formats), m.Formats)
+	}
+	v := m.VideoFormats()
+	if len(v) != 2 || v[0].ID != "299" {
+		t.Errorf("video sort: got %+v", v)
+	}
+	a := m.AudioFormats()
+	if len(a) != 1 || a[0].ID != "140" {
+		t.Errorf("audio-only filter: got %+v", a)
+	}
+	// Progressive format must carry HasAudio so the UI can collapse the
+	// audio rocker into "(included)".
+	for _, f := range v {
+		if f.ID == "22" && !f.HasAudio {
+			t.Errorf("progressive format 22 missing HasAudio flag")
+		}
+	}
+}
