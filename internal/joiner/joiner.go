@@ -9,8 +9,7 @@ import (
 	"github.com/abzcoding/hget/internal/ui"
 )
 
-// JoinFile joins separate chunks and assembles the final downloaded artifact.
-func JoinFile(files []string, out string) error {
+func JoinFile(files []string, out string) (err error) {
 	sort.Strings(files)
 
 	ui.Printf("Start joining %d parts\n", len(files))
@@ -18,11 +17,17 @@ func JoinFile(files []string, out string) error {
 		ui.Program.Send(ui.JoinStartMsg{Total: len(files)})
 	}
 
-	outf, err := os.OpenFile(out, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
+	outf, err := os.OpenFile(out, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0666)
 	if err != nil {
 		return err
 	}
-	defer outf.Close()
+	// Ignoring Close on a writable file can mask flush errors that lead to
+	// silent data loss on a full disk; surface them to the caller.
+	defer func() {
+		if cerr := outf.Close(); cerr != nil && err == nil {
+			err = fmt.Errorf("closing output file: %w", cerr)
+		}
+	}()
 
 	for i, f := range files {
 		if err = copyChunk(f, outf); err != nil {
@@ -31,6 +36,10 @@ func JoinFile(files []string, out string) error {
 		if ui.Program != nil {
 			ui.Program.Send(ui.JoinProgressMsg{Current: i + 1})
 		}
+	}
+
+	if err = outf.Sync(); err != nil {
+		return fmt.Errorf("flushing output file: %w", err)
 	}
 
 	if ui.Program != nil {

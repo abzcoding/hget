@@ -19,11 +19,11 @@ const (
 
 // ShowMessage displays a styled message box and returns immediately.
 func ShowMessage(msgType MessageType, title, message string) {
-	cPhosphor := lipgloss.Color("#73E0FF")
-	cAmber := lipgloss.Color("#FFB75A")
-	cMint := lipgloss.Color("#5EE6A1")
-	cMagenta := lipgloss.Color("#FF5478")
-	cSteel := lipgloss.Color("#5A6B85")
+	cPhosphor := Theme.Phosphor
+	cAmber := Theme.Amber
+	cMint := Theme.Mint
+	cMagenta := Theme.Magenta
+	cSteel := Theme.Steel
 
 	var borderColor lipgloss.Color
 	var icon string
@@ -58,7 +58,7 @@ func ShowMessage(msgType MessageType, title, message string) {
 	styleMessage := lipgloss.NewStyle().Foreground(cSteel)
 
 	titleLine := fmt.Sprintf("%s  %s", icon, styleTitle.Render(title))
-	
+
 	// Wrap message to fit box width
 	maxWidth := 60
 	lines := strings.Split(message, "\n")
@@ -88,9 +88,9 @@ func ShowMessage(msgType MessageType, title, message string) {
 			}
 		}
 	}
-	
+
 	content := titleLine + "\n\n" + styleMessage.Render(strings.Join(wrappedLines, "\n"))
-	
+
 	fmt.Println()
 	fmt.Println(styleBox.Render(content))
 	fmt.Println()

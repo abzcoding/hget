@@ -96,7 +96,7 @@ func TestDataLinkStates(t *testing.T) {
 		for i := 0; i < 5; i++ {
 			d.Tick(totalSpeed, s.peak, partSpeeds)
 		}
-		
+
 		fmt.Println("─── " + s.label + " ───")
 		fmt.Println(d.View(s.channels, s.total, s.size, s.peak, s.elapsed, s.status, s.carrier))
 		fmt.Println()

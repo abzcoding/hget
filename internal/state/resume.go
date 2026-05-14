@@ -29,7 +29,7 @@ func PromptResume(urlOrTask string) (*State, bool) {
 	if err != nil {
 		return nil, true
 	}
-	
+
 	// Calculate total downloaded bytes
 	var downloaded int64
 	var total int64
@@ -37,14 +37,14 @@ func PromptResume(urlOrTask string) (*State, bool) {
 		downloaded += part.RangeFrom
 		total += (part.RangeTo - part.RangeFrom + 1)
 	}
-	
+
 	// Show animated TUI prompt
 	resume, err := ui.ResumePrompt(util.TaskFromURL(urlOrTask), downloaded, total)
 	if err != nil {
 		// On error, default to fresh download
 		return nil, true
 	}
-	
+
 	if resume {
 		// Validate part files
 		st, err := Resume(urlOrTask)
@@ -56,7 +56,7 @@ func PromptResume(urlOrTask string) (*State, bool) {
 		}
 		return st, true
 	}
-	
+
 	// User chose not to resume — clean up old state
 	folder := FolderOf(urlOrTask)
 	if err := os.RemoveAll(folder); err != nil {

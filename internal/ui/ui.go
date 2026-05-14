@@ -9,14 +9,16 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/bubbles/help"
+	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/progress"
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/harmonica"
 	"github.com/charmbracelet/huh"
 	"github.com/charmbracelet/lipgloss"
 	charmlog "github.com/charmbracelet/log"
-	"github.com/mattn/go-colorable"
 	"github.com/mattn/go-isatty"
 )
 
@@ -26,30 +28,24 @@ var DisplayProgress = true
 
 // ── Colors ────────────────────────────────────────────────────────────────────
 //
-// "Carrier" palette — refined network telemetry.
-// One dominant data colour (phosphor cyan), one sharp accent (amber).
-// Success / error are the only places we use other hues, so they actually pop.
-//
-//	Dominant:  phosphor cyan       — data, totals, primary bars
-//	Accent:    amber               — active operations, ETA, in-flight speed
-//	Success:   mint                — completed states only
-//	Error:     hot magenta         — distinct from cliched ANSI red
-//	Chrome:    steel               — frames, separators, secondary labels
-//	Highlight: frost               — key values, banner
+// All colour values live in theme.go (ui.Theme).  The names below are
+// short package-local aliases so renderers can write `colorPhosphor`
+// without prefacing every reference with `Theme.`.  Aliases are kept so
+// existing call-sites (banner, log icons, verify summary, batch styles)
+// keep compiling.
 
 var (
-	colorPhosphor = lipgloss.Color("#73E0FF") // dominant cyan
-	colorAmber    = lipgloss.Color("#FFB75A") // sharp accent
-	colorMint     = lipgloss.Color("#5EE6A1") // success
-	colorMagenta  = lipgloss.Color("#FF5478") // error
-	colorSteel    = lipgloss.Color("#5A6B85") // chrome / labels
-	colorSlate    = lipgloss.Color("#3A475C") // dimmer chrome (separators)
-	colorFrost    = lipgloss.Color("#E8F1F8") // highlight values
-	colorDeepCyan = lipgloss.Color("#1E7A99") // bar gradient start
+	colorPhosphor = Theme.Phosphor
+	colorAmber    = Theme.Amber
+	colorMint     = Theme.Mint
+	colorMagenta  = Theme.Magenta
+	colorSteel    = Theme.Steel
+	colorSlate    = Theme.Slate
+	colorFrost    = Theme.Frost
+	colorDeepCyan = Theme.DeepCyan
 
-	// Aliases preserved so existing references (banner, log icons, verify
-	// summary, batch styles) keep compiling without code churn.
-	colorPurple = colorPhosphor // banner / accent — repurposed to phosphor
+	// Legacy hue aliases — phased out in favour of the carrier names above.
+	colorPurple = colorPhosphor
 	colorCyan   = colorPhosphor
 	colorGreen  = colorMint
 	colorYellow = colorAmber
@@ -71,9 +67,9 @@ var (
 			Width(8).
 			MarginRight(1)
 
-	styleValue = lipgloss.NewStyle().Foreground(colorFrost)
+	styleValue       = lipgloss.NewStyle().Foreground(colorFrost)
 	styleAccentValue = lipgloss.NewStyle().Foreground(colorPhosphor).Bold(true)
-	styleSep   = lipgloss.NewStyle().Foreground(colorSlate)
+	styleSep         = lipgloss.NewStyle().Foreground(colorSlate)
 
 	styleLogInfo  = lipgloss.NewStyle().Foreground(colorCyan)
 	styleLogWarn  = lipgloss.NewStyle().Foreground(colorYellow)
@@ -120,12 +116,10 @@ var (
 			Foreground(colorSteel).
 			Background(lipgloss.Color("#1B2230")).
 			Padding(0, 1)
-	styleDone = lipgloss.NewStyle().Foreground(colorGreen).Bold(true)
-	styleETA       = lipgloss.NewStyle().Foreground(colorYellow)
-	styleError     = lipgloss.NewStyle().Foreground(colorRed).Bold(true)
-	styleVerifyOK  = lipgloss.NewStyle().Foreground(colorGreen).Bold(true)
-	styleVerifyBad = lipgloss.NewStyle().Foreground(colorRed).Bold(true)
-	styleErrBox    = lipgloss.NewStyle().
+	styleDone   = lipgloss.NewStyle().Foreground(colorGreen).Bold(true)
+	styleETA    = lipgloss.NewStyle().Foreground(colorYellow)
+	styleError  = lipgloss.NewStyle().Foreground(colorRed).Bold(true)
+	styleErrBox = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(colorRed).
 			Padding(0, 2).
@@ -230,6 +224,32 @@ type StoppingMsg struct {
 // SkippingMsg overlays a "skipping" panel for the current batch item.
 type SkippingMsg struct{}
 
+// BatchItemBeginMsg signals the start of a new item inside a persistent
+// batch TUI program.  The model resets per-item state but keeps the SAN
+// cabinet, history, and program alive (no alt-screen toggling).
+type BatchItemBeginMsg struct {
+	Index    int // 0-based index into the batch
+	URL      string
+	FileName string
+}
+
+// BatchItemEndMsg signals an item finished (success / fail / skip / abort).
+// Updates the SAN bay status without quitting the program.
+type BatchItemEndMsg struct {
+	Index  int
+	Status BatchItemStatus
+	Reason string
+}
+
+// BatchFinishedMsg signals all items have run; render the final summary
+// frame and auto-quit.
+type BatchFinishedMsg struct {
+	Done    int
+	Failed  int
+	Skipped int
+	Aborted int
+}
+
 // ── Per-part model ────────────────────────────────────────────────────────────
 
 type partModel struct {
@@ -294,6 +314,11 @@ type tuiModel struct {
 	// batch context (0 = not in a batch)
 	batchCurrent int // 1-based index of this download in the batch
 	batchTotal   int // total downloads in the batch
+	// batchHistory mirrors RunOptions.BatchHistory: the parent batch
+	// loop's lifecycle record for each item when this TUI session
+	// started.  Used to seed the SAN cabinet's bay statuses so skipped /
+	// failed bays don't masquerade as DONE.
+	batchHistory []BatchItemSnapshot
 
 	// lifecycle
 	started    bool
@@ -317,6 +342,12 @@ type tuiModel struct {
 	stopping       bool
 	stoppingReason string
 	skipping       bool
+	// skipped is the *terminal* skipped state — set when the worker
+	// goroutine finished because the user pressed 's'.  Distinct from
+	// `skipping` (transitional) which signals the request is in flight
+	// while the worker drains.  When skipped is true we render a
+	// dedicated "transfer severed" scene instead of the error screen.
+	skipped bool
 
 	// spinner (pre-start and verify)
 	spinner spinner.Model
@@ -324,14 +355,130 @@ type tuiModel struct {
 	// link — animated data-link / modem panel rendered as the centrepiece
 	// of the download view; absorbs per-channel rows + aggregate bar so
 	// nothing is duplicated below.
-	link dataLink
-	modem modemHandshake
-	joinAnim joinAnimation
+	link       dataLink
+	modem      modemHandshake
+	joinAnim   joinAnimation
 	verifyAnim verifyAnimation
 
-	// terminal width
-	width int
+	// 90s mainframe-themed scene primitives.  Used at terminal widths
+	// >= mainframeSceneMinWidth to wrap the data-link panel inside an
+	// actual mainframe→cable→tape composition.  Below that threshold the
+	// model falls back to the data-link panel alone.
+	mf      mainframe
+	bus     cable
+	tape    tape
+	sanView san
+	hasSan  bool
+
+	// terminal dimensions
+	width  int
+	height int
+
+	// batchMode — set when this TUI session drives an entire batch via a
+	// single persistent tea.Program.  When true, DownloadDoneMsg and
+	// DownloadErrorMsg do NOT auto-quit; the wrapping goroutine moves to
+	// the next item by sending BatchItemBeginMsg.
+	batchMode bool
+
+	// final batch summary, populated on BatchFinishedMsg.
+	batchFinished                                                          bool
+	batchFinalDone, batchFinalFailed, batchFinalSkipped, batchFinalAborted int
 }
+
+// ── Layout tiers ──────────────────────────────────────────────────────────────
+//
+// The download view composes several boxes that each have a fixed minimum
+// height: data-link panel (~12), tape banner (9), mainframe (17), plus
+// metadata header and footer chrome (~10).  At low terminal heights the
+// composed view overruns the screen.  The tier system detects the
+// available room and progressively downgrades the visualisation:
+//
+//   tierFull         — vertical stack: mainframe → cable → tape → data-link
+//   tierSideBySide   — mainframe alongside tape (saves ~12 rows of height
+//                      but needs ~138 cells of width)
+//   tierTapeOnly     — tape banner only (no mainframe), then data-link
+//   tierMinimal      — data-link panel alone
+//
+// Mainframe + tape composition is purely chrome; the data-link panel is
+// the canonical telemetry surface and is never dropped.
+
+type layoutTier int
+
+const (
+	tierMinimal    layoutTier = iota // data-link only
+	tierTapeOnly                     // tape banner + data-link
+	tierSideBySide                   // mainframe + tape side-by-side + data-link
+	tierFull                         // full vertical stack
+)
+
+// chromeMinHeight estimates the rows consumed by everything that is NOT
+// the mainframe scene + data-link panel: metadata block (~5), separators
+// (~2), sparkline (~2), footer (~2).  Used to decide how much room is
+// left for the scene primitives.
+const chromeMinHeight = 10
+
+// computeTier picks the richest layout that fits the current terminal.
+func (m tuiModel) computeTier() layoutTier {
+	// Treat unknown size as "full" so non-TTY snapshot tests still work.
+	if m.width == 0 || m.height == 0 {
+		return tierFull
+	}
+	// Available rows for the scene + datalink panel together.
+	chrome := chromeMinHeight
+	if m.batchTotal > 1 {
+		chrome += 2 // batch counter banner adds two rows
+	}
+	avail := m.height - chrome
+	dataLinkH := len(m.parts) + 8 // headers + per-part rows + agg + borders
+	if dataLinkH < 12 {
+		dataLinkH = 12
+	}
+	sceneBudget := avail - dataLinkH
+
+	// Batch downloads use the SAN cabinet instead of mainframe+cable+tape.
+	// SAN height varies with the number of bay rows we can pack in; we
+	// prefer the chassis-on variant ("full") and fall back to compact
+	// (no chassis) when only a single bay row fits.
+	if m.batchTotal > 1 {
+		// SAN minimum widths: 1 bay = 24 cells inner, 2 bays = 48, 3 = 70.
+		// Allow tier=Full when at least 1 bay fits with chassis.
+		switch {
+		case fittingBayRows(sceneBudget, true) >= 1 && m.width >= mainframeSceneMinWidth:
+			return tierFull
+		case fittingBayRows(sceneBudget, false) >= 1 && m.width >= mainframeSceneMinWidth:
+			return tierTapeOnly
+		default:
+			return tierMinimal
+		}
+	}
+
+	// Single-download tier thresholds.
+	const (
+		mainframeH        = 17
+		cableH            = 3
+		tapeH             = 9
+		sideBySideMinW    = 138
+		fullStackMinW     = mainframeSceneMinWidth
+		mainframeMinScene = mainframeH + cableH + tapeH // 29
+		tapeOnlyMinScene  = tapeH                       // 9
+	)
+
+	switch {
+	case avail >= mainframeMinScene+dataLinkH && m.width >= fullStackMinW:
+		return tierFull
+	case avail >= mainframeH+dataLinkH && m.width >= sideBySideMinW:
+		return tierSideBySide
+	case avail >= tapeOnlyMinScene+dataLinkH && m.width >= mainframeSceneMinWidth:
+		return tierTapeOnly
+	default:
+		return tierMinimal
+	}
+}
+
+// mainframeSceneMinWidth — below this terminal width we render the
+// data-link panel without the mainframe/cable/tape wrapping (insufficient
+// horizontal room for the cabinet block).
+const mainframeSceneMinWidth = 76
 
 // Program is the global tea.Program; goroutines call Program.Send() to deliver messages.
 var Program *tea.Program
@@ -341,6 +488,20 @@ var Program *tea.Program
 // onSkip is non-nil only in batch mode and is invoked when the user presses
 // 's'.  onQuit is invoked on 'q' / 'ctrl+c'; both default to no-ops if nil.
 func NewTUIModel(numConns int, willVerify bool, batchCurrent, batchTotal int, onSkip, onQuit func()) tuiModel {
+	return NewTUIModelWithHistory(numConns, willVerify, batchCurrent, batchTotal, nil, onSkip, onQuit)
+}
+
+// NewTUIModelWithHistory is the variant that lets the caller seed the
+// per-batch-item lifecycle record.  Used by RunWithTUI when the parent
+// batch loop has accumulated skip / fail / done history before this TUI
+// session was started.
+func NewTUIModelWithHistory(
+	numConns int,
+	willVerify bool,
+	batchCurrent, batchTotal int,
+	history []BatchItemSnapshot,
+	onSkip, onQuit func(),
+) tuiModel {
 	s := spinner.New()
 	s.Spinner = signalPulse
 	s.Style = lipgloss.NewStyle().Foreground(colorAmber)
@@ -352,6 +513,7 @@ func NewTUIModel(numConns int, willVerify bool, batchCurrent, batchTotal int, on
 		willVerify:    willVerify,
 		batchCurrent:  batchCurrent,
 		batchTotal:    batchTotal,
+		batchHistory:  history,
 		overallSpring: harmonica.NewSpring(harmonica.FPS(60), 7.0, 0.85),
 		joinSpring:    harmonica.NewSpring(harmonica.FPS(60), 7.0, 0.85),
 		onSkip:        onSkip,
@@ -361,7 +523,36 @@ func NewTUIModel(numConns int, willVerify bool, batchCurrent, batchTotal int, on
 		modem:         newModemHandshake(),
 		joinAnim:      newJoinAnimation(),
 		verifyAnim:    newVerifyAnimation(),
+		mf:            newMainframe(),
+		bus:           newCable(),
+		tape:          newTape(tapeLabelFor(batchCurrent)),
 	}
+}
+
+// sanStatusFromBatch maps the batch-layer lifecycle status onto the
+// SAN's bay status.  Aborted items render the same as failed because
+// both terminate without producing a usable file.
+func sanStatusFromBatch(s BatchItemStatus) sanItemStatus {
+	switch s {
+	case BatchItemDone:
+		return sanDone
+	case BatchItemSkipped:
+		return sanSkipped
+	case BatchItemFailed:
+		return sanFailed
+	case BatchItemAborted:
+		return sanFailed
+	}
+	return sanQueued
+}
+
+// tapeLabelFor produces the plate text on the tape unit.  In batch mode
+// the active item's index becomes the label; otherwise a generic name.
+func tapeLabelFor(batchCurrent int) string {
+	if batchCurrent > 0 {
+		return fmt.Sprintf("TAPE-%02d", batchCurrent)
+	}
+	return "TAPE-01"
 }
 
 // Sparkline configuration — a rolling history of total download speed
@@ -386,6 +577,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
+		m.height = msg.Height
 		bw := calcBarWidth(m.width)
 		for i := range m.parts {
 			m.parts[i].bar = newPartBar(bw)
@@ -461,10 +653,31 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
-		// Overall spring.
+		// Overall spring.  Prefer the server-reported total; fall back to
+		// the sum of per-part totals when Content-Length is missing
+		// ("size: unknown" downloads still know each part's individual
+		// total, so the aggregate is recoverable).  Without the fallback
+		// the active tape and aggregate bar would be pinned at 0%.
 		overallTarget := 0.0
-		if m.size > 0 {
+		switch {
+		case m.size > 0:
 			overallTarget = math.Min(float64(m.totalDown)/float64(m.size), 1.0)
+		default:
+			var sumDown, sumTotal int64
+			allDone := len(m.parts) > 0
+			for _, p := range m.parts {
+				sumDown += p.downloaded
+				sumTotal += p.total
+				if !p.done {
+					allDone = false
+				}
+			}
+			switch {
+			case allDone:
+				overallTarget = 1.0
+			case sumTotal > 0:
+				overallTarget = math.Min(float64(sumDown)/float64(sumTotal), 1.0)
+			}
 		}
 		m.overallPct, m.overallVel = m.overallSpring.Update(m.overallPct, m.overallVel, overallTarget)
 		if m.overallPct < 0 {
@@ -488,22 +701,122 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			partSpeeds[i] = p.speed
 		}
 		m.link.Tick(totalSpeed, m.peakSpeed, partSpeeds)
-		
+
+		// Drive mainframe / cable / tape animations.  Their state is
+		// derived from the lifecycle flags (stopping/skipping/done/etc.)
+		// and the rate-ratio drives packet velocity on the bus and reel
+		// rotation on the tape.
+		rateRatio := 0.0
+		if m.peakSpeed > 0 {
+			rateRatio = math.Min(totalSpeed/m.peakSpeed, 1.0)
+		}
+		mfState, busState, tpState := m.deriveSceneStates()
+		m.mf.SetState(mfState)
+		m.bus.SetState(busState)
+		m.tape.SetState(tpState)
+		// During assembly the tape fill-bar tracks joinPct so the strip
+		// visually rewinds from full to 0 and back to full as parts
+		// merge, matching the LINK aggregate bar.
+		tapePct := m.overallPct
+		if m.joining {
+			tapePct = math.Min(m.joinPct, 1.0)
+		}
+		m.tape.Update(tapePct, totalSpeed, m.peakSpeed)
+		m.mf.Tick()
+		m.bus.Tick(rateRatio)
+		m.tape.Tick()
+
+		// Batch SAN: lazily build it once we know we're in a batch and
+		// keep it in sync with per-item state.  Only the active item's
+		// progress is live (each batch item runs its own TUI session).
+		if m.batchTotal > 1 {
+			if !m.hasSan {
+				items := make([]sanItem, m.batchTotal)
+				for i := range items {
+					items[i] = sanItem{
+						// Compact label fits in the bay plate.
+						Label:  fmt.Sprintf("T-%02d", i+1),
+						Status: sanQueued,
+					}
+				}
+				// Seed prior bays from the parent batch loop's history
+				// when available — tells DONE / SKIPPED / FAILED apart.
+				// Without history, fall back to "everything before
+				// current is DONE" (legacy behaviour).
+				if len(m.batchHistory) == m.batchTotal {
+					for i, h := range m.batchHistory {
+						if h.Label != "" {
+							items[i].Label = h.Label
+						}
+						items[i].Status = sanStatusFromBatch(h.Status)
+					}
+				} else {
+					for i := 0; i < m.batchCurrent-1; i++ {
+						items[i].Status = sanDone
+					}
+				}
+				if m.batchCurrent >= 1 && m.batchCurrent <= len(items) {
+					items[m.batchCurrent-1].Status = sanActive
+				}
+				m.sanView = newSan(items)
+				m.sanView.SetActive(m.batchCurrent - 1)
+				m.hasSan = true
+			}
+			m.sanView.SetWidth(m.width)
+			// Budget the SAN's height so it window-clips bay rows that
+			// don't fit (terminal-aware layout — never overruns the
+			// bottom of the screen).
+			chrome := chromeMinHeight + 2 // batch counter banner adds 2
+			dataLinkH := len(m.parts) + 8
+			if dataLinkH < 12 {
+				dataLinkH = 12
+			}
+			sanBudget := m.height - chrome - dataLinkH
+			if sanBudget < 0 {
+				sanBudget = 0
+			}
+			m.sanView.SetHeight(sanBudget)
+			m.sanView.Update(m.overallPct, totalSpeed, m.peakSpeed, mfState, busState)
+			m.sanView.Tick(rateRatio)
+			// Replace the active bay's generic label with the actual
+			// filename (truncated to fit the bay plate).  Other bays
+			// keep their T-NN slot identifiers — once we move on to the
+			// next item, this gets overwritten with the new file.
+			if m.fileName != "" && m.batchCurrent >= 1 && m.batchCurrent <= len(m.sanView.items) {
+				m.sanView.items[m.batchCurrent-1].Label = m.fileName
+			}
+			// Reflect current-item state on the active tape.
+			if m.stopping || m.skipping {
+				if m.batchCurrent >= 1 && m.batchCurrent <= len(m.sanView.items) {
+					switch {
+					case m.skipping:
+						m.sanView.items[m.batchCurrent-1].Status = sanSkipped
+					case m.stopping:
+						m.sanView.items[m.batchCurrent-1].Status = sanFailed
+					}
+				}
+			}
+		}
+
 		// Advance modem handshake animation when not started
 		if !m.started {
+			m.modem.SetWidth(m.width)
 			m.modem.Tick()
 		}
-		
+
 		// Advance join animation when joining
 		if m.joining {
 			m.joinAnim.Tick()
 		}
-		
-		// Advance verify animation when verifying
-		if m.verifying {
+
+		// Advance verify animation while the vault panel is on screen —
+		// either during scanning (verifying=true) or after the result
+		// is known but the closing screen is still visible (verifyDone
+		// + willVerify), so the LEDs and rivet rows keep their pulse.
+		if m.verifying || (m.verifyDone && m.willVerify) {
 			m.verifyAnim.Tick()
 		}
-		
+
 		if len(m.speedHistory) == 0 || time.Since(m.startTime).Milliseconds()%160 < 20 {
 			m.speedHistory = append(m.speedHistory, totalSpeed)
 			if len(m.speedHistory) > sparklineWidth {
@@ -589,6 +902,15 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.verifyDone = true
 		m.verifyOK = msg.OK
 		m.verifyDetail = msg.Detail
+		// Drive the vault panel into its terminal state with parsed
+		// signing details — replaces the bespoke "verifying…" spinner
+		// with a structured fingerprint / signed-by readout.
+		details := ParseGPGOutput(msg.Detail)
+		if msg.OK {
+			m.verifyAnim.SetVerified(details)
+		} else {
+			m.verifyAnim.SetBreached(details)
+		}
 		return m, nil
 
 	case StoppingMsg:
@@ -610,15 +932,96 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case DownloadDoneMsg:
 		m.done = true
+		if m.batchMode {
+			return m, nil
+		}
 		return m, autoQuitCmd()
 
 	case DownloadErrorMsg:
+		isSkip := m.skipping ||
+			(msg.Err != nil && msg.Err.Error() == "skip current item")
+		if isSkip {
+			m.skipping = true // make the scene primitives stay disconnected
+			m.skipped = true
+			if m.batchMode {
+				return m, nil
+			}
+			return m, autoQuitCmd()
+		}
 		m.hasError = true
 		if msg.Err != nil {
 			m.errMsg = msg.Err.Error()
 		} else {
 			m.errMsg = "unknown error"
 		}
+		if m.batchMode {
+			return m, nil
+		}
+		return m, autoQuitCmd()
+
+	case BatchItemBeginMsg:
+		// Reset per-item state — but keep the SAN, history, dimensions,
+		// and batchMode intact.  This is the seam between items inside a
+		// single persistent tea.Program.
+		m.url = msg.URL
+		m.fileName = msg.FileName
+		m.size = 0
+		m.ips = nil
+		m.parts = nil
+		m.totalDown = 0
+		m.peakSpeed = 0
+		m.speedHistory = m.speedHistory[:0]
+		// Start the elapsed clock now so the data-link panel's stats
+		// row reads sensibly during the inter-item handshake before
+		// DownloadStartMsg arrives.  DownloadStartMsg will overwrite it.
+		m.startTime = time.Now()
+		m.overallPct = 0
+		m.overallVel = 0
+		m.joinPct = 0
+		m.joinVel = 0
+		m.started = false
+		m.done = false
+		m.hasError = false
+		m.errMsg = ""
+		m.skipping = false
+		m.skipped = false
+		m.stopping = false
+		m.stoppingReason = ""
+		m.joining = false
+		m.joinCurrent = 0
+		m.joinTotal = 0
+		m.verifying = false
+		m.verifyDone = false
+		m.verifyOK = false
+		m.verifyDetail = ""
+		m.logs = m.logs[:0]
+		m.batchCurrent = msg.Index + 1
+		// Re-init animations so each item starts with a fresh handshake.
+		m.modem = newModemHandshake()
+		m.link = newDataLink()
+		m.tape = newTape(tapeLabelFor(m.batchCurrent))
+		if m.hasSan && msg.Index >= 0 && msg.Index < len(m.sanView.items) {
+			if msg.FileName != "" {
+				m.sanView.items[msg.Index].Label = msg.FileName
+			}
+			m.sanView.items[msg.Index].Status = sanActive
+			m.sanView.SetActive(msg.Index)
+		}
+		return m, nil
+
+	case BatchItemEndMsg:
+		if m.hasSan && msg.Index >= 0 && msg.Index < len(m.sanView.items) {
+			m.sanView.items[msg.Index].Status = sanStatusFromBatch(msg.Status)
+		}
+		return m, nil
+
+	case BatchFinishedMsg:
+		m.batchFinished = true
+		m.batchFinalDone = msg.Done
+		m.batchFinalFailed = msg.Failed
+		m.batchFinalSkipped = msg.Skipped
+		m.batchFinalAborted = msg.Aborted
+		m.done = true
 		return m, autoQuitCmd()
 
 	case autoQuitMsg:
@@ -682,7 +1085,7 @@ func (m tuiModel) View() string {
 	// Header — during the active download phase, render the animated
 	// data-link panel (which absorbs per-channel + aggregate readouts).
 	// Otherwise fall back to the wordmark banner.
-	useLink := m.started && !m.done && !m.hasError && !m.joining && w >= dataLinkInnerW+4
+	useLink := m.started && !m.done && !m.hasError && w >= dataLinkInnerW+4
 	if !useLink {
 		b.WriteString(styleBanner.Render(banner))
 		b.WriteString("\n")
@@ -715,27 +1118,39 @@ func (m tuiModel) View() string {
 			Render(batchLine) + "\n\n")
 	}
 
-	// Pre-start spinner.
-	if !m.started && !m.hasError {
-		// Animated modem handshake
+	// Batch summary screen — final frame shown after every item has run.
+	if m.batchFinished {
+		return m.renderBatchSummary(sep)
+	}
+
+	// Pre-start spinner — used only for the very first frame of a
+	// single-item session.  In batch mode we never take this branch
+	// (even before the first DownloadStartMsg arrives) so the data-link
+	// scene stays mounted across the whole batch — the inner stage
+	// just transitions from HANDSHAKE → DOWNLOADING → ASSEMBLING as
+	// each item runs, without ever replacing the panel itself.
+	if !m.started && !m.batchMode && !m.hasError {
 		modemView := m.modem.View(m.url)
-		// Center the modem box
 		for _, line := range strings.Split(modemView, "\n") {
 			b.WriteString(line + "\n")
 		}
 		b.WriteString("\n")
-		
+
 		if m.stopping || m.skipping {
 			b.WriteString("\n" + m.renderStopOverlay() + "\n")
 		}
-		
+
 		b.WriteString(sep + "\n")
 		b.WriteString(m.renderFooter())
 		return b.String()
 	}
 
+	if m.skipped && !m.batchMode {
+		return m.renderSkipScreen(sep)
+	}
+
 	// Error screen.
-	if m.hasError {
+	if m.hasError && !m.batchMode {
 		// Build channel state at error point
 		channels := make([]channelRow, len(m.parts))
 		for i, p := range m.parts {
@@ -752,7 +1167,7 @@ func (m tuiModel) View() string {
 				HasStarted: p.downloaded > 0,
 			}
 		}
-		
+
 		linkView := m.link.View(channels, m.totalDown, m.size, m.peakSpeed,
 			time.Since(m.startTime), "ERROR", false)
 		// Centre the panel
@@ -764,10 +1179,10 @@ func (m tuiModel) View() string {
 		for _, line := range strings.Split(linkView, "\n") {
 			b.WriteString(padStr + line + "\n")
 		}
-		
+
 		b.WriteString("\n")
 		b.WriteString("  " + styleError.Render("◆ LINK FAILED") + "\n\n")
-		b.WriteString("  " + styleErrBox.Render(m.errMsg) + "\n\n")
+		b.WriteString(styleErrBox.MarginLeft(2).Render(m.errMsg) + "\n\n")
 		b.WriteString(sep + "\n")
 		b.WriteString(styleHelp.Render("  closing in 3 s  •  ") + styleHelpKey.Render("q") + styleHelp.Render(" quit now"))
 		return b.String()
@@ -790,7 +1205,7 @@ func (m tuiModel) View() string {
 	b.WriteString("\n" + sep + "\n\n")
 
 	// Completion screen.
-	if m.done && !m.joining {
+	if m.done && !m.joining && !m.batchMode {
 		// Build final channel state (all at 100%)
 		channels := make([]channelRow, len(m.parts))
 		for i := range m.parts {
@@ -803,7 +1218,7 @@ func (m tuiModel) View() string {
 				HasStarted: true,
 			}
 		}
-		
+
 		linkView := m.link.View(channels, m.size, m.size, m.peakSpeed,
 			time.Since(m.startTime), "COMPLETE", true)
 		// Centre the panel
@@ -815,9 +1230,9 @@ func (m tuiModel) View() string {
 		for _, line := range strings.Split(linkView, "\n") {
 			b.WriteString(padStr + line + "\n")
 		}
-		
+
 		b.WriteString("\n")
-		
+
 		elapsed := time.Since(m.startTime)
 		var avg float64
 		if s := elapsed.Seconds(); s > 0 {
@@ -828,23 +1243,20 @@ func (m tuiModel) View() string {
 		b.WriteString("    " + styleLabel.Render("avg") + " " + styleAccentValue.Render(formatSpeed(avg)) + "\n")
 		b.WriteString("    " + styleLabel.Render("peak") + " " + styleAccentValue.Render(formatSpeed(m.peakSpeed)) + "\n")
 		b.WriteString("    " + styleLabel.Render("saved") + " " + styleValue.Render(m.fileName) + "\n")
-		// Verification result row.
+		// Verification result — render the full vault panel beneath the
+		// summary so success / failure carries the same chrome / LED
+		// vibe as the rest of the carrier theme, with parsed fingerprint
+		// + signed-by detail rows.
 		if m.willVerify {
-			b.WriteString("    " + styleLabel.Render("sig") + " ")
-			if m.verifyDone {
-				if m.verifyOK {
-					b.WriteString(styleVerifyOK.Render("⬢ valid") + "\n")
-				} else {
-					b.WriteString(styleVerifyBad.Render("◈ invalid") + "\n")
-					if m.verifyDetail != "" {
-						lines := strings.SplitN(strings.TrimSpace(m.verifyDetail), "\n", 3)
-						for _, l := range lines {
-							b.WriteString("         " + styleLogError.Render(truncate(l, w-11)) + "\n")
-						}
-					}
-				}
-			} else {
-				b.WriteString(m.spinner.View() + "  verifying…\n")
+			b.WriteString("\n")
+			vaultPad := (w - vaultWidth) / 2
+			if vaultPad < 0 {
+				vaultPad = 0
+			}
+			vPadStr := strings.Repeat(" ", vaultPad)
+			vaultView := m.verifyAnim.View()
+			for _, line := range strings.Split(vaultView, "\n") {
+				b.WriteString(vPadStr + line + "\n")
 			}
 		}
 		b.WriteString("\n" + sep + "\n")
@@ -853,85 +1265,191 @@ func (m tuiModel) View() string {
 	}
 
 	// Verifying phase (download+join complete, waiting for GPG result).
-	if m.verifying && !m.done {
-		// Animated verify box
+	// In single-item mode we replace the scene with the full vault panel.
+	// In batch mode we keep the data-link scene mounted (status flips to
+	// VERIFYING, with an inline indicator below the panel) so there is
+	// no jumpscare between items.
+	if m.verifying && !m.done && !m.batchMode {
+		vaultPad := (w - vaultWidth) / 2
+		if vaultPad < 0 {
+			vaultPad = 0
+		}
+		vPadStr := strings.Repeat(" ", vaultPad)
 		verifyView := m.verifyAnim.View()
 		for _, line := range strings.Split(verifyView, "\n") {
-			b.WriteString(line + "\n")
+			b.WriteString(vPadStr + line + "\n")
 		}
 		b.WriteString("\n")
-		
+
 		if m.stopping || m.skipping {
 			b.WriteString("\n" + m.renderStopOverlay() + "\n")
 		}
-		
+
 		b.WriteString(sep + "\n")
 		b.WriteString(m.renderFooter())
 		return b.String()
 	}
 
-	// Join phase.
-	if m.joining {
-		// Animated join box
-		pct := math.Min(m.joinPct, 1.0)
-		joinView := m.joinAnim.View(pct, m.joinCurrent, m.joinTotal)
-		for _, line := range strings.Split(joinView, "\n") {
-			b.WriteString(line + "\n")
-		}
-		b.WriteString("\n" + sep + "\n")
-	} else {
-		// Build per-channel rows for the data-link panel.
-		channels := make([]channelRow, len(m.parts))
-		for i, p := range m.parts {
-			rawPct := 0.0
-			if p.total > 0 {
-				rawPct = math.Min(float64(p.downloaded)/float64(p.total), 1.0)
-			}
-			if p.done {
-				rawPct = 1.0
-			}
+	// Build per-channel rows for the data-link panel.  During the join
+	// phase the channels are "absorbed" into the aggregate — they keep
+	// their slot but render as DONE so the layout stays identical.
+	//
+	// In batch mode, between items, m.parts may be empty (the next
+	// item's range probe hasn't returned yet).  We synthesize
+	// placeholder rows from m.numConns so the panel's height never
+	// collapses — only the LEDs and bars animate.
+	partCount := len(m.parts)
+	placeholders := partCount == 0 && m.batchMode && m.numConns > 0
+	if placeholders {
+		partCount = m.numConns
+	}
+	channels := make([]channelRow, partCount)
+	for i := 0; i < partCount; i++ {
+		if placeholders {
 			channels[i] = channelRow{
 				Index:      i,
-				Pct:        math.Max(0, math.Min(p.smoothPct, 1.0)),
-				RawPct:     rawPct,
-				Speed:      p.speed,
-				Done:       p.done,
-				HasStarted: p.downloaded > 0,
+				Pct:        0,
+				RawPct:     0,
+				Speed:      0,
+				Done:       false,
+				HasStarted: false,
 			}
+			continue
 		}
+		p := m.parts[i]
+		rawPct := 0.0
+		if p.total > 0 {
+			rawPct = math.Min(float64(p.downloaded)/float64(p.total), 1.0)
+		}
+		if p.done {
+			rawPct = 1.0
+		}
+		done := p.done
+		smoothPct := p.smoothPct
+		if m.joining {
+			// During assembly, channels gradually flip "absorbed" left-to-right
+			// as merging proceeds.  Visually shows parts being consumed into
+			// the output stream.
+			done = true
+			rawPct = 1.0
+			smoothPct = 1.0
+		}
+		channels[i] = channelRow{
+			Index:      i,
+			Pct:        math.Max(0, math.Min(smoothPct, 1.0)),
+			RawPct:     rawPct,
+			Speed:      p.speed,
+			Done:       done,
+			HasStarted: p.downloaded > 0,
+		}
+	}
 
-		// Compose link status word from lifecycle state.
-		status := "downloading"
-		online := true
-		switch {
-		case m.stopping:
-			status = "STOPPING"
-			online = false
-		case m.skipping:
-			status = "SKIPPING"
-			online = false
-		case m.verifying:
-			status = "DOWNLOADING"
-		case m.totalDown == 0:
-			status = "HANDSHAKE"
-			online = false
-		default:
-			status = "DOWNLOADING"
-		}
+	// Compose link status word from lifecycle state.
+	status := "DOWNLOADING"
+	online := true
+	switch {
+	case m.stopping:
+		status = "STOPPING"
+		online = false
+	case m.skipping:
+		status = "SKIPPING"
+		online = false
+	case m.verifying:
+		// Verification only enters the data-link scene path in batch
+		// mode (single-item mode short-circuits above).
+		status = "VERIFYING"
+	case m.joining:
+		status = "ASSEMBLING"
+	case placeholders, !m.started, m.totalDown == 0:
+		status = "HANDSHAKE"
+		online = false
+	default:
+		status = "DOWNLOADING"
+	}
 
-		linkView := m.link.View(channels, m.totalDown, m.size, m.peakSpeed,
-			time.Since(m.startTime), status, online)
-		// Centre the panel in the terminal.
-		pad := (w - dataLinkInnerW - 2) / 2
-		if pad < 0 {
-			pad = 0
+	// During assembly, override the LINK aggregate bar to track joinPct
+	// so the bar replays from 0→100% as merging proceeds.  Channels are
+	// already at 100% so the previous totalDown==size would pin it full.
+	linkTotal := m.totalDown
+	linkSize := m.size
+	if m.joining {
+		// Use a synthetic size pair so the aggregate bar reflects joinPct.
+		linkSize = int64(len(m.parts))
+		if linkSize < 1 {
+			linkSize = 1
 		}
-		padStr := strings.Repeat(" ", pad)
-		for _, line := range strings.Split(linkView, "\n") {
-			b.WriteString(padStr + line + "\n")
-		}
+		linkTotal = int64(math.Round(math.Min(m.joinPct, 1.0) * float64(linkSize)))
+	}
 
-		// Sparkline beneath the link panel — recent throughput history.
+	linkView := m.link.View(channels, linkTotal, linkSize, m.peakSpeed,
+		time.Since(m.startTime), status, online)
+	// Centre the panel in the terminal.
+	pad := (w - dataLinkInnerW - 2) / 2
+	if pad < 0 {
+		pad = 0
+	}
+	padStr := strings.Repeat(" ", pad)
+
+	tier := m.computeTier()
+	switch {
+	case m.batchTotal > 1 && m.hasSan && tier >= tierTapeOnly:
+		m.sanView.SetCompact(tier < tierFull)
+		for _, line := range strings.Split(m.sanView.View(), "\n") {
+			b.WriteString(line + "\n")
+		}
+		b.WriteString("\n")
+	case tier > tierMinimal:
+		b.WriteString(m.renderMainframeScene())
+	}
+
+	for _, line := range strings.Split(linkView, "\n") {
+		b.WriteString(padStr + line + "\n")
+	}
+
+	// Below the data-link panel: a single status line whose content
+	// reflects the current phase.  Keeping the line present (rather
+	// than appearing/disappearing) prevents vertical layout shifts
+	// between phases — only the contents animate.
+	spinners := []string{"◐", "◓", "◑", "◒"}
+	dimStyle := lipgloss.NewStyle().Foreground(colorSteel)
+	switch {
+	case m.joining:
+		mergeStyle := lipgloss.NewStyle().Foreground(colorAmber).Bold(true)
+		spin := mergeStyle.Render(spinners[m.joinAnim.frame%len(spinners)])
+		cur := m.joinCurrent
+		if cur < 1 {
+			cur = 1
+		}
+		if cur > m.joinTotal {
+			cur = m.joinTotal
+		}
+		line := "  " + spin + "  " +
+			mergeStyle.Render("ASSEMBLING") + "  " +
+			dimStyle.Render(fmt.Sprintf("part %d of %d  ·  %.1f%%",
+				cur, m.joinTotal, math.Min(m.joinPct, 1.0)*100))
+		b.WriteString("\n" + padStr + line + "\n")
+	case m.verifying && m.batchMode:
+		vStyle := lipgloss.NewStyle().Foreground(colorPhosphor).Bold(true)
+		spin := vStyle.Render(spinners[(m.verifyAnim.Frame())%len(spinners)])
+		line := "  " + spin + "  " +
+			vStyle.Render("VERIFYING") + "  " +
+			dimStyle.Render("checking signature")
+		b.WriteString("\n" + padStr + line + "\n")
+	case placeholders || (!m.started && m.batchMode):
+		// Inter-item handshake — the next item's range probe is in
+		// flight.  A muted "preparing next transfer" placeholder keeps
+		// the row populated so the panel doesn't appear to flicker.
+		hStyle := lipgloss.NewStyle().Foreground(colorPhosphor)
+		spin := hStyle.Render(spinners[(m.modem.Frame())%len(spinners)])
+		label := "preparing next transfer"
+		if m.fileName != "" {
+			label = "preparing  " + m.fileName
+		}
+		line := "  " + spin + "  " +
+			hStyle.Render("HANDSHAKE") + "  " +
+			dimStyle.Render(label)
+		b.WriteString("\n" + padStr + line + "\n")
+	default:
 		if spark := m.renderSparkline(); spark != "" {
 			peakLabel := lipgloss.NewStyle().Foreground(colorSteel).Render("peak " + formatBytes(int64(m.peakSpeed)) + "/s")
 			rateLabel := lipgloss.NewStyle().Foreground(colorSteel).Render("rate ↗ ")
@@ -958,6 +1476,243 @@ func (m tuiModel) View() string {
 	// Footer.
 	b.WriteString("\n" + sep + "\n")
 	b.WriteString(m.renderFooter())
+	return b.String()
+}
+
+// deriveSceneStates maps the model's lifecycle flags onto the mainframe /
+// cable / tape state machines used by the 90s scene primitives.
+func (m tuiModel) deriveSceneStates() (mainframeState, cableState, tapeState) {
+	switch {
+	case m.hasError:
+		return mfAlarm, cableDisconnected, tapeDisconnected
+	case m.skipping:
+		return mfAlarm, cableDisconnected, tapeDisconnected
+	case m.stopping:
+		return mfAlarm, cableDisconnected, tapeDisconnected
+	case m.done && !m.joining:
+		return mfComplete, cableComplete, tapeComplete
+	case m.joining:
+		return mfTransferring, cableActive, tapeTransferring
+	case !m.started:
+		return mfIdle, cableIdle, tapeIdle
+	case m.totalDown == 0:
+		return mfHandshaking, cableConnecting, tapeMounting
+	default:
+		return mfTransferring, cableActive, tapeTransferring
+	}
+}
+
+// renderMainframeScene composes the mainframe scene appropriate for the
+// current layout tier.  Returns empty string for tierMinimal.
+func (m tuiModel) renderMainframeScene() string {
+	switch m.computeTier() {
+	case tierFull:
+		return m.renderSceneFullStack()
+	case tierSideBySide:
+		return m.renderSceneSideBySide()
+	case tierTapeOnly:
+		return m.renderSceneTapeOnly()
+	default:
+		return ""
+	}
+}
+
+// renderSceneFullStack — vertical stack: mainframe → cable → tape banner.
+func (m tuiModel) renderSceneFullStack() string {
+	w := m.width
+	if w < mainframeSceneMinWidth {
+		return ""
+	}
+
+	mfPad := (w - mainframeWidth) / 2
+	if mfPad < 0 {
+		mfPad = 0
+	}
+	mfPadStr := strings.Repeat(" ", mfPad)
+	mfLines := strings.Split(m.mf.View(), "\n")
+
+	var b strings.Builder
+	for _, line := range mfLines {
+		b.WriteString(mfPadStr + line + "\n")
+	}
+
+	const cableRows = 3
+	portCol := m.mf.PortColumn()
+	cableLines := strings.Split(m.bus.View(cableRows, mainframeWidth, portCol), "\n")
+	for _, line := range cableLines {
+		b.WriteString(mfPadStr + line + "\n")
+	}
+
+	bannerPad := (w - tapeBannerWidth) / 2
+	if bannerPad < 0 {
+		bannerPad = 0
+	}
+	bannerPadStr := strings.Repeat(" ", bannerPad)
+	for _, line := range strings.Split(m.tape.ViewBanner(), "\n") {
+		b.WriteString(bannerPadStr + line + "\n")
+	}
+	return b.String()
+}
+
+// renderSceneSideBySide — mainframe LEFT, horizontal cable bridge MIDDLE,
+// tape banner RIGHT (vertically centered against the taller mainframe).
+// Total width: mainframeWidth + 1 + bridgeWidth + 1 + tapeBannerWidth.
+func (m tuiModel) renderSceneSideBySide() string {
+	const bridgeW = 11
+
+	mfLines := strings.Split(m.mf.View(), "\n")
+	tapeLines := strings.Split(m.tape.ViewBanner(), "\n")
+
+	mfH := len(mfLines)
+	tapeH := len(tapeLines)
+	tapeTopPad := (mfH - tapeH) / 2
+	if tapeTopPad < 0 {
+		tapeTopPad = 0
+	}
+
+	// Pad tape vertically to mfH rows so we can stitch row-by-row.
+	padded := make([]string, mfH)
+	blank := strings.Repeat(" ", tapeBannerWidth)
+	for i := 0; i < mfH; i++ {
+		padded[i] = blank
+	}
+	for i := 0; i < tapeH && tapeTopPad+i < mfH; i++ {
+		padded[tapeTopPad+i] = tapeLines[i]
+	}
+
+	// Horizontal cable bridge.  Drawn at the vertical centre row,
+	// matching the tape's recording head row so it visually connects to
+	// the magnetic strip.
+	bridgeRow := tapeTopPad + tapeH/2
+	bridge := m.renderBridge(bridgeW, mfH, bridgeRow)
+
+	// Total scene width.
+	sceneW := mainframeWidth + 1 + bridgeW + 1 + tapeBannerWidth
+	scenePad := (m.width - sceneW) / 2
+	if scenePad < 0 {
+		scenePad = 0
+	}
+	padStr := strings.Repeat(" ", scenePad)
+
+	var b strings.Builder
+	for i := 0; i < mfH; i++ {
+		b.WriteString(padStr + mfLines[i] + " " + bridge[i] + " " + padded[i] + "\n")
+	}
+	return b.String()
+}
+
+// renderBridge produces an mfH-row × width-cell horizontal cable that
+// connects the mainframe (left) to the tape (right) at bridgeRow.
+func (m tuiModel) renderBridge(width, rows, bridgeRow int) []string {
+	chrome := lipgloss.NewStyle().Foreground(colorPhosphor)
+	mint := lipgloss.NewStyle().Foreground(colorMint).Bold(true)
+	mag := lipgloss.NewStyle().Foreground(colorMagenta).Bold(true)
+	amber := lipgloss.NewStyle().Foreground(colorAmber).Bold(true)
+	dim := lipgloss.NewStyle().Foreground(colorSlate)
+
+	// Pick palette mirroring the cable's state.
+	mfState, busState, _ := m.deriveSceneStates()
+	_ = mfState
+	var lineSty lipgloss.Style
+	switch busState {
+	case cableComplete:
+		lineSty = mint
+	case cableDisconnected:
+		lineSty = mag
+	case cableConnecting:
+		lineSty = amber
+	case cableIdle:
+		lineSty = dim
+	default:
+		lineSty = chrome
+	}
+
+	out := make([]string, rows)
+	blank := strings.Repeat(" ", width)
+	for i := 0; i < rows; i++ {
+		out[i] = blank
+	}
+
+	// Animated packet position along the bridge.
+	pkt := -1
+	if busState == cableActive || busState == cableConnecting {
+		pkt = (m.tape.frame / 2) % width
+	}
+
+	if bridgeRow < 0 {
+		bridgeRow = rows / 2
+	}
+	if bridgeRow >= rows {
+		bridgeRow = rows - 1
+	}
+
+	// Build the line with connector caps at each end.
+	var line strings.Builder
+	for c := 0; c < width; c++ {
+		switch {
+		case c == 0 || c == width-1:
+			line.WriteString(lineSty.Render("▣"))
+		case busState == cableDisconnected && c%3 == 1:
+			line.WriteByte(' ')
+		case c == pkt:
+			switch busState {
+			case cableComplete:
+				line.WriteString(mint.Render("●"))
+			case cableConnecting:
+				line.WriteString(amber.Render("●"))
+			default:
+				line.WriteString(amber.Render("●"))
+			}
+		case busState == cableDisconnected:
+			line.WriteString(lineSty.Render("╴"))
+		default:
+			line.WriteString(lineSty.Render("═"))
+		}
+	}
+	out[bridgeRow] = line.String()
+
+	// Add support brackets above/below the bridge for a "patch panel" feel.
+	if bridgeRow-1 >= 0 {
+		var sup strings.Builder
+		for c := 0; c < width; c++ {
+			switch {
+			case c == 0 || c == width-1:
+				sup.WriteString(dim.Render("│"))
+			default:
+				sup.WriteByte(' ')
+			}
+		}
+		out[bridgeRow-1] = sup.String()
+	}
+	if bridgeRow+1 < rows {
+		var sup strings.Builder
+		for c := 0; c < width; c++ {
+			switch {
+			case c == 0 || c == width-1:
+				sup.WriteString(dim.Render("│"))
+			default:
+				sup.WriteByte(' ')
+			}
+		}
+		out[bridgeRow+1] = sup.String()
+	}
+
+	return out
+}
+
+// renderSceneTapeOnly — tape banner alone.  Used when there's enough room
+// for the tape decoration but not the full mainframe stack.
+func (m tuiModel) renderSceneTapeOnly() string {
+	w := m.width
+	bannerPad := (w - tapeBannerWidth) / 2
+	if bannerPad < 0 {
+		bannerPad = 0
+	}
+	padStr := strings.Repeat(" ", bannerPad)
+	var b strings.Builder
+	for _, line := range strings.Split(m.tape.ViewBanner(), "\n") {
+		b.WriteString(padStr + line + "\n")
+	}
 	return b.String()
 }
 
@@ -990,36 +1745,238 @@ func (m tuiModel) renderSparkline() string {
 	return body + tip
 }
 
-// renderStopOverlay produces the yellow/cyan boxed "stopping…" / "skipping…"
-// banner shown while the worker goroutine is still draining.  It mirrors the
-// styling of the verify completion box so the UI feels consistent.
+func (m tuiModel) renderSkipScreen(sep string) string {
+	var b strings.Builder
+	w := m.width
+	if w == 0 {
+		w = 80
+	}
+
+	// Banner header to anchor the screen — same as on the pre-start view.
+	b.WriteString(styleBanner.Render(banner) + "\n")
+	b.WriteString(lipgloss.NewStyle().Foreground(colorSteel).Render(bannerStrap) + "\n")
+	b.WriteString(lipgloss.NewStyle().Foreground(colorPhosphor).
+		Render(strings.Repeat("═", sepWidth(w))) + "\n\n")
+
+	// Optional batch counter (mirrors the live-download view).
+	if m.batchTotal > 1 {
+		idx := lipgloss.NewStyle().Foreground(colorAmber).Bold(true).
+			Render(fmt.Sprintf("%02d", m.batchCurrent))
+		of := lipgloss.NewStyle().Foreground(colorSteel).
+			Render(fmt.Sprintf(" / %02d", m.batchTotal))
+		batchLine := "  ⌘  batch " + idx + of +
+			"  " + styleSep.Render("│") + "  " +
+			lipgloss.NewStyle().Foreground(colorAmber).Bold(true).Render("⤳ skipped")
+		b.WriteString(lipgloss.NewStyle().
+			Border(lipgloss.NormalBorder(), false, false, false, true).
+			BorderForeground(colorAmber).
+			Padding(0, 0, 0, 1).
+			Foreground(colorFrost).
+			Render(batchLine) + "\n\n")
+	}
+
+	// Render the scene with all primitives in disconnected/alarm state.
+	// deriveSceneStates already maps m.skipping → mfAlarm/cableDisconnected
+	// /tapeDisconnected, so we just call the regular scene render path.
+	tier := m.computeTier()
+	switch {
+	case m.batchTotal > 1 && m.hasSan && tier >= tierTapeOnly:
+		m.sanView.SetCompact(tier < tierFull)
+		for _, line := range strings.Split(m.sanView.View(), "\n") {
+			b.WriteString(line + "\n")
+		}
+		b.WriteString("\n")
+	case tier > tierMinimal:
+		b.WriteString(m.renderMainframeScene())
+	}
+
+	// Caption block: "⤳ TRANSFER SKIPPED" header, file, next item.
+	headSty := lipgloss.NewStyle().Foreground(colorAmber).Bold(true)
+	b.WriteString("\n  " + headSty.Render("⤳ TRANSFER SKIPPED") + "\n\n")
+	if m.fileName != "" {
+		b.WriteString("    " + styleLabel.Render("file") + " " +
+			styleValue.Render(m.fileName) + "\n")
+	}
+	if m.batchTotal > 1 && m.batchCurrent < m.batchTotal {
+		b.WriteString("    " + styleLabel.Render("next") + " " +
+			styleAccentValue.Render(fmt.Sprintf("item %02d / %02d",
+				m.batchCurrent+1, m.batchTotal)) + "\n")
+	} else if m.batchTotal > 1 {
+		b.WriteString("    " + styleLabel.Render("next") + " " +
+			lipgloss.NewStyle().Foreground(colorSteel).Render("(end of batch)") + "\n")
+	}
+
+	b.WriteString("\n" + sep + "\n")
+	b.WriteString(styleHelp.Render("  closing in 3 s  •  ") +
+		styleHelpKey.Render("q") + styleHelp.Render(" quit now"))
+	return b.String()
+}
+
+// renderBatchSummary renders the final, single-frame summary that closes
+// out a batch run inside the persistent TUI program.  The SAN cabinet
+// stays on screen so the user sees the full lifecycle at a glance, with a
+// tally row underneath.
+func (m tuiModel) renderBatchSummary(sep string) string {
+	var b strings.Builder
+	w := m.width
+	if w == 0 {
+		w = 80
+	}
+
+	// Banner header so the closing frame matches the opening aesthetic.
+	b.WriteString(styleBanner.Render(banner) + "\n")
+	b.WriteString(lipgloss.NewStyle().Foreground(colorSteel).Render(bannerStrap) + "\n")
+	b.WriteString(lipgloss.NewStyle().Foreground(colorPhosphor).
+		Render(strings.Repeat("═", sepWidth(w))) + "\n\n")
+
+	// SAN cabinet — full lifecycle for every bay.
+	if m.hasSan {
+		tier := m.computeTier()
+		m.sanView.SetCompact(tier < tierFull)
+		for _, line := range strings.Split(m.sanView.View(), "\n") {
+			b.WriteString(line + "\n")
+		}
+		b.WriteString("\n")
+	}
+
+	// Tally row.
+	total := len(m.sanView.items)
+	if total == 0 {
+		total = m.batchFinalDone + m.batchFinalFailed + m.batchFinalSkipped + m.batchFinalAborted
+	}
+	tally := func(label string, n int, sty lipgloss.Style) string {
+		if n == 0 {
+			return ""
+		}
+		return sty.Render(fmt.Sprintf("%d %s", n, label))
+	}
+	parts := []string{}
+	mintB := lipgloss.NewStyle().Foreground(colorMint).Bold(true)
+	amberB := lipgloss.NewStyle().Foreground(colorAmber).Bold(true)
+	magB := lipgloss.NewStyle().Foreground(colorMagenta).Bold(true)
+	if s := tally("done", m.batchFinalDone, mintB); s != "" {
+		parts = append(parts, s)
+	}
+	if s := tally("skipped", m.batchFinalSkipped, amberB); s != "" {
+		parts = append(parts, s)
+	}
+	if s := tally("failed", m.batchFinalFailed, magB); s != "" {
+		parts = append(parts, s)
+	}
+	if s := tally("aborted", m.batchFinalAborted, amberB); s != "" {
+		parts = append(parts, s)
+	}
+	dot := styleSep.Render("  ·  ")
+	tallyLine := strings.Join(parts, dot)
+
+	var head string
+	switch {
+	case m.batchFinalAborted > 0 && m.batchFinalFailed == 0:
+		head = amberB.Render("⊘ BATCH ABORTED")
+	case m.batchFinalFailed == 0:
+		head = mintB.Render("⬢ BATCH COMPLETE")
+	default:
+		head = magB.Render("◈ BATCH FINISHED WITH ERRORS")
+	}
+	b.WriteString("  " + head + "\n")
+	if tallyLine != "" {
+		b.WriteString("  " + styleSep.Render("│") + "  " + tallyLine + "  " +
+			styleSep.Render("│") + "  " +
+			lipgloss.NewStyle().Foreground(colorSteel).Render(fmt.Sprintf("%d total", total)) + "\n")
+	}
+
+	b.WriteString("\n" + sep + "\n")
+	b.WriteString(styleHelp.Render("  closing in 3 s  •  ") +
+		styleHelpKey.Render("q") + styleHelp.Render(" quit now"))
+	return b.String()
+}
+
 func (m tuiModel) renderStopOverlay() string {
 	if m.skipping && !m.stopping {
-		text := "  " + m.spinner.View() + "  Skipping current download — discarding parts"
-		return styleSkipBox.Render(text)
+		text := m.spinner.View() + "  Skipping current download — discarding parts"
+		return styleSkipBox.MarginLeft(2).Render(text)
 	}
 	reason := m.stoppingReason
 	if reason == "" {
 		reason = "Stopping — saving state"
 	}
-	text := "  " + m.spinner.View() + "  " + reason
-	return styleStopBox.Render(text)
+	text := m.spinner.View() + "  " + reason
+	return styleStopBox.MarginLeft(2).Render(text)
 }
 
-// renderFooter renders the bottom help bar.  Keys are rendered as small
-// rounded "key cap" pills so available actions read at a glance.
-func (m tuiModel) renderFooter() string {
-	var parts []string
-	if m.stopping {
-		parts = append(parts, styleHelp.Render("press ")+styleKeyCap.Render("q")+styleHelp.Render(" again to force-quit"))
-	} else {
-		if m.onSkip != nil {
-			parts = append(parts, styleKeyCap.Render("s")+" "+styleHelp.Render("skip item"))
-		}
-		parts = append(parts, styleKeyCap.Render("q")+" "+styleHelp.Render("stop & save"))
-		parts = append(parts, styleKeyCap.Render("⌃C")+" "+styleHelp.Render("abort"))
+// keymap declares every active key binding for the TUI footer using
+// bubbles/key.  The struct implements help.KeyMap so bubbles/help can
+// render the bindings into a single help line.  The key.Help.Key text is
+// pre-styled with the carrier keycap pill so help.View produces the same
+// "rounded cap + label" aesthetic the renderer used to hand-roll.
+type keymap struct {
+	Skip  key.Binding
+	Stop  key.Binding
+	Abort key.Binding
+}
+
+// ShortHelp is bubbles/help's short-form contract.  Order = render order.
+func (k keymap) ShortHelp() []key.Binding {
+	bs := []key.Binding{}
+	if k.Skip.Enabled() {
+		bs = append(bs, k.Skip)
 	}
-	return "  " + strings.Join(parts, styleHelp.Render("   "))
+	bs = append(bs, k.Stop, k.Abort)
+	return bs
+}
+
+// FullHelp returns the same set; we don't render a separate full help.
+func (k keymap) FullHelp() [][]key.Binding { return [][]key.Binding{k.ShortHelp()} }
+
+// helpModel is a package-level help.Model with carrier-themed styles.
+// Styling the ShortKey with the keycap background reproduces the original
+// bespoke pill design while letting bubbles/help own the layout.
+var helpModel = func() help.Model {
+	h := help.New()
+	keyCap := lipgloss.NewStyle().
+		Foreground(colorFrost).
+		Background(colorSlate).
+		Bold(true).
+		Padding(0, 1)
+	h.Styles.ShortKey = keyCap
+	h.Styles.ShortDesc = lipgloss.NewStyle().Foreground(colorMuted)
+	h.Styles.ShortSeparator = lipgloss.NewStyle().Foreground(colorMuted).
+		SetString("   ")
+	h.Styles.FullKey = keyCap
+	h.Styles.FullDesc = lipgloss.NewStyle().Foreground(colorMuted)
+	h.Styles.FullSeparator = lipgloss.NewStyle().Foreground(colorMuted).
+		SetString("   ")
+	return h
+}()
+
+// renderFooter renders the bottom help bar via bubbles/help against the
+// model's keymap.  In stopping mode we override with a single force-quit
+// hint so users discover the second-press behaviour.
+func (m tuiModel) renderFooter() string {
+	if m.stopping {
+		return "  " + styleHelp.Render("press ") +
+			styleKeyCap.Render("q") +
+			styleHelp.Render(" again to force-quit")
+	}
+	km := keymap{
+		Skip: key.NewBinding(
+			key.WithKeys("s", "S"),
+			key.WithHelp("s", "skip item"),
+			key.WithDisabled(),
+		),
+		Stop: key.NewBinding(
+			key.WithKeys("q", "Q"),
+			key.WithHelp("q", "stop & save"),
+		),
+		Abort: key.NewBinding(
+			key.WithKeys("ctrl+c"),
+			key.WithHelp("⌃C", "abort"),
+		),
+	}
+	if m.onSkip != nil {
+		km.Skip.SetEnabled(true)
+	}
+	return "  " + helpModel.View(km)
 }
 
 // maxInt returns the larger of a, b.  Tiny helper for sep-width math.
@@ -1086,10 +2043,14 @@ func formatDuration(d time.Duration) string {
 
 // ── Console logging ───────────────────────────────────────────────────────────
 
+// Stdout / Stderr — direct os handles.  termenv (used by lipgloss) detects
+// the active output's capabilities and writes appropriate ANSI sequences,
+// including on modern Windows terminals (10+, 2019+) which support
+// VT processing natively.  go-colorable is no longer required.
 var (
-	Stdout    = colorable.NewColorableStdout()
-	Stderr    = colorable.NewColorableStderr()
-	DefaultUI = Console{Stdout: Stdout, Stderr: Stderr}
+	Stdout    io.Writer = os.Stdout
+	Stderr    io.Writer = os.Stderr
+	DefaultUI           = Console{Stdout: Stdout, Stderr: Stderr}
 
 	// Log is the global structured console logger used when the TUI is inactive.
 	// It uses charmbracelet/log with custom lipgloss styles matching the TUI palette.
@@ -1214,6 +2175,21 @@ func (c Console) Errorln(a ...any) (n int, err error) {
 
 // ── High-level helpers used by cmd layer ──────────────────────────────────────
 
+type BatchItemStatus int
+
+const (
+	BatchItemQueued BatchItemStatus = iota
+	BatchItemDone
+	BatchItemSkipped
+	BatchItemFailed
+	BatchItemAborted
+)
+
+type BatchItemSnapshot struct {
+	Label  string
+	Status BatchItemStatus
+}
+
 // RunOptions configures a TUI session.
 type RunOptions struct {
 	// Ctx is observed for external cancellation (e.g. SIGINT routed through
@@ -1228,25 +2204,23 @@ type RunOptions struct {
 	WillVerify   bool
 	BatchCurrent int
 	BatchTotal   int
+	BatchHistory []BatchItemSnapshot
 }
 
-// RunWithTUI starts a Bubble Tea program for interactive TTY sessions and runs
-// fn in a background goroutine.  Falls back to plain execution when not in a
-// TTY.  Returns the error returned by fn (or recovered from a panic inside
-// it), so callers can distinguish skip vs abort vs failure.
 func RunWithTUI(opts RunOptions, fn func() error) error {
 	if isatty.IsTerminal(os.Stdout.Fd()) && DisplayProgress {
-		model := NewTUIModel(opts.NumConns, opts.WillVerify, opts.BatchCurrent, opts.BatchTotal, opts.OnSkip, opts.OnQuit)
-		// Disable bubbletea's built-in SIGINT handler so external signals are
-		// handled by the parent context (signal.NotifyContext at main).  This
-		// keeps cancellation routing single-source and lets us show a real
-		// "stopping…" overlay instead of dropping the alt-screen.
+		model := NewTUIModelWithHistory(
+			opts.NumConns,
+			opts.WillVerify,
+			opts.BatchCurrent,
+			opts.BatchTotal,
+			opts.BatchHistory,
+			opts.OnSkip,
+			opts.OnQuit,
+		)
 		p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithoutSignalHandler())
 		Program = p
 
-		// Watch the parent context: if it gets cancelled (external SIGINT or
-		// the caller decided to abort), surface the stopping overlay so the
-		// user sees what's happening while state is being saved.
 		stopWatch := make(chan struct{})
 		if opts.Ctx != nil {
 			go func() {
@@ -1262,10 +2236,6 @@ func RunWithTUI(opts RunOptions, fn func() error) error {
 			}()
 		}
 
-		// fnDone is closed once fn() (and its defer) have fully completed.
-		// We MUST wait for this before returning so that the next RunWithTUI call
-		// cannot set ui.Program to a new value while the old download goroutines
-		// are still alive and sending PartProgressMsg etc. into it.
 		fnDone := make(chan struct{})
 		var fnErr error
 		go func() {
@@ -1286,17 +2256,19 @@ func RunWithTUI(opts RunOptions, fn func() error) error {
 			}()
 			fnErr = fn()
 		}()
+		// Library code shouldn't terminate the process — surface the TUI
+		// error to the caller (main) which decides the exit code.
 		if _, err := p.Run(); err != nil {
-			fmt.Fprintln(os.Stderr, "TUI error:", err)
-			os.Exit(1)
+			Program = nil
+			close(stopWatch)
+			<-fnDone
+			if fnErr != nil {
+				return fmt.Errorf("tui: %w (download error: %v)", err, fnErr)
+			}
+			return fmt.Errorf("tui: %w", err)
 		}
-		// Clear the global handle first so that any in-flight progress writes
-		// from the goroutine see nil and stop sending immediately.
 		Program = nil
 		close(stopWatch)
-		// Now wait for fn() to finish.  This blocks until Execute() returns and
-		// all its child goroutines (downloadPart, dl.Do) have exited, guaranteeing
-		// zero stale messages can reach the next TUI session.
 		<-fnDone
 		return fnErr
 	}
@@ -1304,9 +2276,6 @@ func RunWithTUI(opts RunOptions, fn func() error) error {
 	return fn()
 }
 
-// carrierTheme returns a huh theme that matches the TUI's "carrier" palette
-// (phosphor cyan + amber on a dark steel ground).  Centralising the theme keeps
-// every interactive prompt visually consistent with the live TUI.
 func carrierTheme() *huh.Theme {
 	t := huh.ThemeBase()
 	t.Focused.Title = t.Focused.Title.Foreground(colorPhosphor).Bold(true)
@@ -1333,9 +2302,6 @@ func carrierTheme() *huh.Theme {
 	return t
 }
 
-// ConfirmRedownload shows a styled huh confirmation prompt asking whether to
-// overwrite an existing file.  Returns true when the user says yes (or when
-// stdout is not a terminal, in which case the download proceeds silently).
 func ConfirmRedownload(filename string) bool {
 	if !isatty.IsTerminal(os.Stdout.Fd()) {
 		return true
@@ -1363,97 +2329,78 @@ func ConfirmRedownload(filename string) bool {
 	return proceed
 }
 
-// PrintHelp renders a styled --help screen to stdout.
+const helpMarkdown = "" +
+	"# hget\n" +
+	"\n" +
+	"_carrier signal · multi-stream telemetry · resumable_\n" +
+	"\n" +
+	"## Usage\n" +
+	"\n" +
+	"```\n" +
+	"hget [options] <url>\n" +
+	"hget [options] --resume=<task-name>\n" +
+	"hget --file=<urls-file> [options]\n" +
+	"```\n" +
+	"\n" +
+	"## Options\n" +
+	"\n" +
+	"| Flag                | Description                                            | Default     |\n" +
+	"| ------------------- | ------------------------------------------------------ | ----------- |\n" +
+	"| `-n <int>`          | number of parallel connections                         | _# of CPUs_ |\n" +
+	"| `--skip-tls`        | skip TLS certificate verification                      | `false`     |\n" +
+	"| `--proxy <addr>`    | proxy (`socks5: host:port` or `http://host:port`)      |             |\n" +
+	"| `--file <path>`     | path to a file containing one URL per line             |             |\n" +
+	"| `--rate <limit>`    | bandwidth cap per download (e.g. `10kB`, `5MiB`)       |             |\n" +
+	"| `--resume <task>`   | resume a stopped download by task name or URL          |             |\n" +
+	"| `--probe <url>`     | probe URL for range support & content-length only      |             |\n" +
+	"| `--timeout <dur>`   | timeout waiting for response headers (e.g. `30s`)      | `15s`       |\n" +
+	"| `--verify`          | download & GPG-verify the `.sig` signature file        | `false`     |\n" +
+	"\n" +
+	"## Examples\n" +
+	"\n" +
+	"```bash\n" +
+	"# basic download\n" +
+	"hget https://example.com/file.iso\n" +
+	"\n" +
+	"# 8 connections, 5 MiB/s cap\n" +
+	"hget -n 8 --rate 5MiB https://example.com/large.tar.gz\n" +
+	"\n" +
+	"# resume an interrupted download\n" +
+	"hget --resume https://example.com/file.iso\n" +
+	"\n" +
+	"# batch download from a file\n" +
+	"hget --file urls.txt\n" +
+	"\n" +
+	"# probe server without downloading\n" +
+	"hget --probe https://example.com/file.iso\n" +
+	"\n" +
+	"# download & verify GPG signature\n" +
+	"hget --verify https://example.com/file.iso\n" +
+	"```\n"
+
 func PrintHelp() {
-	// ── Banner ────────────────────────────────────────────────────────────────
+	// ── Banner (unchanged ANSI wordmark) ─────────────────────────────────
 	fmt.Fprintln(Stdout, styleBanner.Render(banner))
 	fmt.Fprintln(Stdout, lipgloss.NewStyle().Foreground(colorSteel).Render(bannerStrap))
 	fmt.Fprintln(Stdout, lipgloss.NewStyle().Foreground(colorPhosphor).Render(strings.Repeat("═", 68)))
 	fmt.Fprintln(Stdout)
 
-	w := 68 // fixed help width
-	sep := styleSep.Render(strings.Repeat("┄", w))
-
-	// ── Shared style helpers ──────────────────────────────────────────────────
-	sectionHeader := lipgloss.NewStyle().
-		Foreground(colorPurple).
-		Bold(true).
-		MarginLeft(2)
-
-	flagName := lipgloss.NewStyle().
-		Foreground(colorCyan).
-		Bold(true).
-		Width(20)
-
-	flagDesc := lipgloss.NewStyle().
-		Foreground(colorWhite)
-
-	flagDefault := lipgloss.NewStyle().
-		Foreground(colorMuted)
-
-	usageLine := lipgloss.NewStyle().
-		Foreground(colorGreen).
-		MarginLeft(4)
-
-	exampleLine := lipgloss.NewStyle().
-		Foreground(colorCyan).
-		MarginLeft(4)
-
-	commentLine := lipgloss.NewStyle().
-		Foreground(colorMuted).
-		MarginLeft(4)
-
-	// ── Usage ────────────────────────────────────────────────────────────────
-	fmt.Fprintln(Stdout, sectionHeader.Render("USAGE"))
-	fmt.Fprintln(Stdout, usageLine.Render("hget [options] <url>"))
-	fmt.Fprintln(Stdout, usageLine.Render("hget [options] --resume=<task-name>"))
-	fmt.Fprintln(Stdout, usageLine.Render("hget --file=<urls-file> [options]"))
-	fmt.Fprintln(Stdout)
-	fmt.Fprintln(Stdout, sep)
-	fmt.Fprintln(Stdout)
-
-	// ── Options ───────────────────────────────────────────────────────────────
-	type opt struct{ flag, desc, def string }
-	options := []opt{
-		{"-n <int>", "number of parallel connections", "# of CPUs"},
-		{"--skip-tls", "skip TLS certificate verification", "false"},
-		{"--proxy <addr>", "proxy  (socks5: host:port  |  http: http://host:port)", ""},
-		{"--file <path>", "path to a file containing one URL per line", ""},
-		{"--rate <limit>", "bandwidth cap per download  (e.g. 10kB, 5MiB)", ""},
-		{"--resume <task>", "resume a stopped download by task name or URL", ""},
-		{"--probe <url>", "probe URL for range support & content-length only", ""},
-		{"--timeout <dur>", "timeout waiting for response headers  (e.g. 30s, 1m)", "15s"},
-		{"--verify", "download & GPG-verify the .sig signature file", "false"},
+	r, err := glamour.NewTermRenderer(
+		glamour.WithAutoStyle(),
+		glamour.WithWordWrap(72),
+	)
+	if err != nil {
+		// Fallback: print raw markdown when glamour can't init (no TTY,
+		// missing chroma styles, etc.) — still readable.
+		fmt.Fprint(Stdout, helpMarkdown)
+		return
 	}
-
-	fmt.Fprintln(Stdout, sectionHeader.Render("OPTIONS"))
-	for _, o := range options {
-		line := "  " + flagName.Render(o.flag) + "  " + flagDesc.Render(o.desc)
-		if o.def != "" {
-			line += "  " + flagDefault.Render("(default: "+o.def+")")
-		}
-		fmt.Fprintln(Stdout, line)
+	out, err := r.Render(helpMarkdown)
+	if err != nil {
+		fmt.Fprint(Stdout, helpMarkdown)
+		return
 	}
-	fmt.Fprintln(Stdout)
-	fmt.Fprintln(Stdout, sep)
-	fmt.Fprintln(Stdout)
-
-	// ── Examples ─────────────────────────────────────────────────────────────
-	fmt.Fprintln(Stdout, sectionHeader.Render("EXAMPLES"))
-
-	examples := []struct{ comment, cmd string }{
-		{"basic download", "hget https://example.com/file.iso"},
-		{"8 connections, 5 MiB/s cap", "hget -n 8 --rate 5MiB https://example.com/large.tar.gz"},
-		{"resume an interrupted download", "hget --resume https://example.com/file.iso"},
-		{"batch download from a file", "hget --file urls.txt"},
-		{"probe server without downloading", "hget --probe https://example.com/file.iso"},
-		{"download & verify GPG signature", "hget --verify https://example.com/file.iso"},
-	}
-	for _, e := range examples {
-		fmt.Fprintln(Stdout, commentLine.Render("# "+e.comment))
-		fmt.Fprintln(Stdout, exampleLine.Render(e.cmd))
-		fmt.Fprintln(Stdout)
-	}
+	fmt.Fprint(Stdout, out)
 }
 
 // PrintVerifySummary writes a styled one-line verify result to the terminal

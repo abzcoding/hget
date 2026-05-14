@@ -84,7 +84,7 @@ func main() {
 		if !ui.ConfirmRedownload(destFile) {
 			ui.ShowMessage(ui.MessageInfo, "DOWNLOAD SKIPPED", fmt.Sprintf("File already exists: %s", destFile))
 			if *verify {
-				ok, detail := downloader.RunVerify(downloadURL, *skiptls, proxy, *timeout)
+				ok, detail := downloader.RunVerify(rootCtx, downloadURL, *skiptls, proxy, *timeout)
 				ui.PrintVerifySummary(ok, detail)
 			}
 			return
@@ -121,7 +121,7 @@ func main() {
 			return err
 		}
 		if *verify {
-			verifyOK, verifyDetail = downloader.RunVerify(downloadURL, *skiptls, proxy, *timeout)
+			verifyOK, verifyDetail = downloader.RunVerify(itemCtx, downloadURL, *skiptls, proxy, *timeout)
 			didVerify = true
 		}
 		return nil
@@ -148,7 +148,7 @@ func runResume(rootCtx context.Context, resumeTask string, conn int, skiptls boo
 			os.Exit(1)
 		}
 		// No state.json — try to reconstruct from existing part files.
-		st, err = downloader.ReconstructStateFromParts(resumeTask, skiptls, proxy, timeout)
+		st, err = downloader.ReconstructStateFromParts(rootCtx, resumeTask, skiptls, proxy, timeout)
 		if err == nil {
 			ui.ShowMessage(ui.MessageInfo, "STATE RECONSTRUCTED", fmt.Sprintf("Recovered %d part files — resuming download", len(st.Parts)))
 			runOne(rootCtx, st.URL, st, conn, skiptls, proxy, bwLimit, timeout)
