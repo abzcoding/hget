@@ -2355,6 +2355,9 @@ const helpMarkdown = "" +
 	"| `--probe <url>`     | probe URL for range support & content-length only      |             |\n" +
 	"| `--timeout <dur>`   | timeout waiting for response headers (e.g. `30s`)      | `15s`       |\n" +
 	"| `--verify`          | download & GPG-verify the `.sig` signature file        | `false`     |\n" +
+	"| `--extractor <m>`   | extractor mode: `auto` / `yt-dlp` / `none`             | `auto`      |\n" +
+	"| `--cookies <path>`  | cookies.txt for the extractor (yt-dlp `--cookies`)     |             |\n" +
+	"| `--cookies-from-browser <s>` | extract cookies from browser (e.g. `firefox`, `chrome:Default`) | |\n" +
 	"\n" +
 	"## Examples\n" +
 	"\n" +
@@ -2376,6 +2379,16 @@ const helpMarkdown = "" +
 	"\n" +
 	"# download & verify GPG signature\n" +
 	"hget --verify https://example.com/file.iso\n" +
+	"\n" +
+	"# YouTube / Vimeo / Twitch via yt-dlp (auto-detected) — VCR + Mixer TUI\n" +
+	"hget https://www.youtube.com/watch?v=dQw4w9WgXcQ\n" +
+	"hget --extractor yt-dlp https://example.com/some-stream\n" +
+	"\n" +
+	"# YouTube with a cookies.txt file (bypasses the bot challenge)\n" +
+	"hget --cookies ~/cookies.txt https://www.youtube.com/watch?v=dQw4w9WgXcQ\n" +
+	"\n" +
+	"# YouTube using your live browser cookies (no export needed)\n" +
+	"hget --cookies-from-browser firefox https://www.youtube.com/watch?v=dQw4w9WgXcQ\n" +
 	"```\n"
 
 func PrintHelp() {

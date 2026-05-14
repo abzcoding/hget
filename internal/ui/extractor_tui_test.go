@@ -1,0 +1,294 @@
+package ui
+
+import (
+	"strings"
+	"testing"
+	"time"
+
+	tea "github.com/charmbracelet/bubbletea"
+)
+
+// step routes a sequence of Tea messages through the model and returns
+// the resulting view.  Mirrors what the live program does, minus the
+// real timer goroutine.
+func step(t *testing.T, m extractorModel, msgs ...tea.Msg) extractorModel {
+	t.Helper()
+	var mod tea.Model = m
+	for _, msg := range msgs {
+		mod, _ = mod.Update(msg)
+	}
+	return mod.(extractorModel)
+}
+
+// tickN advances the animation N times so spring physics settle.
+func tickN(t *testing.T, m extractorModel, n int) extractorModel {
+	t.Helper()
+	for i := 0; i < n; i++ {
+		m = step(t, m, extractorTickMsg(time.Now()))
+	}
+	return m
+}
+
+func TestExtractorModel_RendersMetaInVCRPanel(t *testing.T) {
+	m := NewExtractorModel("https://vimeo.com/76979871", func() {})
+	m.width = 100
+	m.height = 60
+
+	m = step(t, m,
+		ExtractorMetaMsg{
+			Title:      "The New Vimeo Player",
+			Channel:    "Vimeo Staff",
+			Duration:   2*time.Minute + 30*time.Second,
+			Resolution: "1280x720",
+			FPS:        30,
+			VCodec:     "avc1.42001f",
+			ACodec:     "mp4a.40.2",
+			Container:  "mp4",
+			HasAudio:   true,
+			OutputFile: "The New Vimeo Player.mp4",
+		},
+		ExtractorPhaseMsg{Phase: "downloading"},
+	)
+	m = tickN(t, m, 5)
+
+	view := m.View()
+	mustContain(t, view, "HGET·VCR/4-HEAD", "VCR brand plate missing")
+	mustContain(t, view, "TRANSPORT", "TRANSPORT label missing")
+	mustContain(t, view, "The New Vimeo Player", "title row missing")
+	mustContain(t, view, "Vimeo Staff", "channel row missing")
+	mustContain(t, view, "1280x720", "resolution missing from video row")
+	mustContain(t, view, "30fps", "fps missing from video row")
+	mustContain(t, view, "avc1.42001f", "video codec missing")
+	mustContain(t, view, "mp4a.40.2", "audio codec missing")
+	mustContain(t, view, "00:02:30", "total duration missing from counter")
+	mustContain(t, view, "● REC", "REC indicator missing from progress row")
+	mustContain(t, view, "AUDIO  L", "VU meter L channel missing")
+	mustContain(t, view, "AUDIO", "AUDIO label missing")
+	mustContain(t, view, "vimeo.com/76979871", "source URL missing")
+}
+
+func TestExtractorModel_ProgressMessagesAdvanceTheBar(t *testing.T) {
+	m := NewExtractorModel("https://vimeo.com/76979871", func() {})
+	m.width = 100
+	m.height = 60
+
+	// Seed metadata so the panel has stable context.
+	m = step(t, m,
+		ExtractorMetaMsg{Title: "X", Container: "mp4", HasAudio: true, Duration: time.Minute},
+		ExtractorPhaseMsg{Phase: "downloading"},
+	)
+
+	// 0% → 50% → 100% — settle the spring after each step.
+	m = step(t, m, ExtractorProgressMsg{
+		Percent: 0.0, Downloaded: 0, Total: 1_000_000, SpeedBPS: 0,
+	})
+	m = tickN(t, m, 60)
+	v0 := m.View()
+
+	m = step(t, m, ExtractorProgressMsg{
+		Percent: 50.0, Downloaded: 500_000, Total: 1_000_000, SpeedBPS: 1_500_000,
+		ETA: 5 * time.Second,
+	})
+	m = tickN(t, m, 90) // give the harmonic spring time to settle near target
+	v50 := m.View()
+
+	m = step(t, m, ExtractorProgressMsg{
+		Percent: 100.0, Downloaded: 1_000_000, Total: 1_000_000, SpeedBPS: 1_500_000,
+	})
+	m = tickN(t, m, 90)
+	v100 := m.View()
+
+	// The percent string in the progress row must change monotonically.
+	pct0 := extractPct(t, v0)
+	pct50 := extractPct(t, v50)
+	pct100 := extractPct(t, v100)
+	t.Logf("rendered percentages: %.1f → %.1f → %.1f", pct0, pct50, pct100)
+	if !(pct0 < pct50 && pct50 < pct100) {
+		t.Errorf("expected monotonic %% (got %.1f, %.1f, %.1f)", pct0, pct50, pct100)
+	}
+	if pct100 < 99.0 {
+		t.Errorf("expected ~100%% after settling, got %.1f", pct100)
+	}
+
+	// Rate row shows the speed at 50%.
+	mustContain(t, v50, "1.4 MB/s", "rate row missing speed at 50%")
+	mustContain(t, v50, "488.3 KB of 976.6 KB", "rate row missing byte-count at 50%")
+}
+
+func TestExtractorModel_FragmentReadout(t *testing.T) {
+	m := NewExtractorModel("https://example.com/m3u8", func() {})
+	m.width = 100
+	m.height = 60
+	m = step(t, m,
+		ExtractorMetaMsg{Title: "HLS Stream", HasAudio: true, Container: "mp4"},
+		ExtractorPhaseMsg{Phase: "downloading"},
+		ExtractorProgressMsg{Percent: 25, Downloaded: 100, Total: 400, Fragment: 137, FragmentN: 320, SpeedBPS: 50_000},
+	)
+	m = tickN(t, m, 5)
+	view := m.View()
+	mustContain(t, view, "FRAG", "fragment label missing")
+	mustContain(t, view, "0137", "current fragment missing")
+	mustContain(t, view, "0320", "total fragments missing")
+}
+
+func TestExtractorModel_MuxingPhaseShowsMixerPanel(t *testing.T) {
+	m := NewExtractorModel("https://vimeo.com/76979871", func() {})
+	m.width = 100
+	m.height = 80
+
+	m = step(t, m,
+		ExtractorMetaMsg{
+			Title: "Sample", VCodec: "vp9", ACodec: "opus", Container: "mp4",
+			HasAudio: true, Duration: time.Minute,
+		},
+		ExtractorPhaseMsg{Phase: "downloading"},
+		ExtractorProgressMsg{Percent: 100, Downloaded: 1000, Total: 1000, SpeedBPS: 0},
+		ExtractorPhaseMsg{Phase: "muxing"},
+	)
+	m = tickN(t, m, 20)
+
+	view := m.View()
+	mustContain(t, view, "HGET·MIX·M-808", "mixer brand plate missing")
+	mustContain(t, view, "CONSOLE", "mixer console label missing")
+	mustContain(t, view, "CH 1 VIDEO", "video channel strip missing")
+	mustContain(t, view, "CH 2 AUDIO", "audio channel strip missing")
+	mustContain(t, view, "MASTER BUS OUT", "master strip missing")
+	mustContain(t, view, "muxing", "muxing status text missing")
+	mustContain(t, view, "60", "EQ frequency axis missing")
+	mustContain(t, view, "16k", "EQ high-frequency band missing")
+}
+
+func TestExtractorModel_OutputPathSurfaced(t *testing.T) {
+	m := NewExtractorModel("https://vimeo.com/x", func() {})
+	m.width = 100
+	m.height = 60
+	m = step(t, m,
+		ExtractorMetaMsg{Title: "X", Container: "mp4", HasAudio: false},
+		ExtractorPhaseMsg{Phase: "downloading"},
+		ExtractorOutputMsg{Path: "/tmp/Resolved Output Path.mp4"},
+	)
+	m = tickN(t, m, 5)
+	view := m.View()
+	mustContain(t, view, "Resolved Output Path.mp4", "resolved output path missing")
+}
+
+func TestExtractorModel_ErrorRenders(t *testing.T) {
+	m := NewExtractorModel("https://vimeo.com/x", func() {})
+	m.width = 100
+	m.height = 60
+	m = step(t, m,
+		ExtractorPhaseMsg{Phase: "downloading"},
+		ExtractorErrorMsg{Err: errString("yt-dlp probe failed: oh no")},
+	)
+	m = tickN(t, m, 5)
+	view := m.View()
+	mustContain(t, view, "yt-dlp probe failed", "error message missing")
+}
+
+// ── helpers ─────────────────────────────────────────────────────────────
+
+type errString string
+
+func (e errString) Error() string { return string(e) }
+
+func mustContain(t *testing.T, view, needle, msg string) {
+	t.Helper()
+	plain := stripANSI(view)
+	if !strings.Contains(plain, needle) {
+		t.Errorf("%s: expected to find %q in view\n--- view ---\n%s", msg, needle, plain)
+	}
+}
+
+// extractPct finds the "NN.N%" text inside the rendered VCR progress row.
+// Looks for the line containing "● REC" (the progress strip) and parses
+// the percent token at the end of it.
+func extractPct(t *testing.T, view string) float64 {
+	t.Helper()
+	plain := stripANSI(view)
+	for _, line := range strings.Split(plain, "\n") {
+		if !strings.Contains(line, "● REC") {
+			continue
+		}
+		// Find the rightmost token ending in '%'
+		fields := strings.Fields(line)
+		for i := len(fields) - 1; i >= 0; i-- {
+			tok := strings.TrimRight(fields[i], "%")
+			if tok == fields[i] {
+				continue
+			}
+			var f float64
+			if _, err := stringsScanf(tok, &f); err == nil {
+				return f
+			}
+		}
+	}
+	t.Fatalf("no progress row found in view:\n%s", plain)
+	return 0
+}
+
+// stringsScanf is a tiny float parser that returns (n, err) like fmt.Sscanf
+// but tolerates leading whitespace and trailing junk.  Avoids the import
+// dance for the only call site above.
+func stringsScanf(s string, f *float64) (int, error) {
+	s = strings.TrimSpace(s)
+	var v float64
+	var sign float64 = 1
+	if strings.HasPrefix(s, "-") {
+		sign = -1
+		s = s[1:]
+	}
+	dot := false
+	frac := 0.0
+	div := 1.0
+	for _, r := range s {
+		switch {
+		case r >= '0' && r <= '9':
+			if dot {
+				div *= 10
+				frac += float64(r-'0') / div
+			} else {
+				v = v*10 + float64(r-'0')
+			}
+		case r == '.':
+			dot = true
+		default:
+			goto done
+		}
+	}
+done:
+	*f = sign * (v + frac)
+	return 1, nil
+}
+
+// stripANSI removes ANSI escape sequences from s so test assertions are
+// stable regardless of palette / terminal capabilities.
+func stripANSI(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	i := 0
+	for i < len(s) {
+		if s[i] == 0x1b {
+			// Skip until the terminating letter of the CSI sequence.
+			i++
+			if i < len(s) && s[i] == '[' {
+				i++
+				for i < len(s) {
+					c := s[i]
+					i++
+					if (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') {
+						break
+					}
+				}
+				continue
+			}
+			// Other escape — skip one char.
+			if i < len(s) {
+				i++
+			}
+			continue
+		}
+		b.WriteByte(s[i])
+		i++
+	}
+	return b.String()
+}
